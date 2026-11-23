@@ -35,26 +35,32 @@ import java.util.List;
 public class RouteMapClient implements ClientModInitializer {
     private static KeyBinding openMapKey;
     private static KeyBinding addMarkKey;
+    private static KeyBinding settingsKey;
     private static MapStorage.Waypoint selectedMark = null;
 
-    // 0 = выкл, 1 = ждём 1-й сундук, 2 = активно записываем
     private static int recordMode = 0;
     private static int recordedChestsCount = 0;
     private static Screen lastHandledScreen = null;
 
-    // Режим прохождения записанного маршрута (-1 = выключен, 0+ = индекс текущего сундука)
     private static int activeRunIndex = -1;
     private static int finishedBannerTicks = 0;
 
-    // Переменные для плавной анимации маркера на экране
     private static float smoothSx = -1f;
     private static float smoothSy = -1f;
     private static float smoothBox = 12f;
     private static MapStorage.Waypoint lastAnimatedTarget = null;
 
+    public static final String[] THEME_NAMES = {"Золотой", "Бирюзовый", "Зелёный", "Красный", "Фиолетовый", "Белый"};
+    public static final int[] THEME_COLORS = {0xFFD700, 0x22D3EE, 0x4ADE80, 0xF87171, 0xC084FC, 0xF8FAFC};
+
     private int tickCounter = 0;
     private int terrainSaveCounter = 0;
     private boolean terrainDirty = false;
+
+    public static int getThemeRgb() {
+        int idx = Math.abs(MapStorage.data.config.themeIndex) % THEME_COLORS.length;
+        return THEME_COLORS[idx];
+    }
 
     @Override
     public void onInitializeClient() {
@@ -66,6 +72,9 @@ public class RouteMapClient implements ClientModInitializer {
         addMarkKey = KeyBindingHelper.registerKeyBinding(new KeyBinding(
                 "key.routemap.mark", InputUtil.Type.KEYSYM, GLFW.GLFW_KEY_B, KeyBinding.Category.MISC
         ));
+        settingsKey = KeyBindingHelper.registerKeyBinding(new KeyBinding(
+                "key.routemap.settings", InputUtil.Type.KEYSYM, GLFW.GLFW_KEY_N, KeyBinding.Category.MISC
+        ));
 
         HudRenderCallback.EVENT.register((ctx, renderTickCounter) -> {
             MinecraftClient client = MinecraftClient.getInstance();
@@ -73,29 +82,38 @@ public class RouteMapClient implements ClientModInitializer {
 
             int sw = client.getWindow().getScaledWidth();
             int sh = client.getWindow().getScaledHeight();
+            MapStorage.HudConfig cfg = MapStorage.data.config;
+            int themeRgb = getThemeRgb();
+            int themeFull = 0xFF000000 | themeRgb;
 
+            // 1. Настраиваемая плашка статуса
             MapStorage.Waypoint target = getCurrentRunTarget();
-            if (recordMode != 0) {
-                String badge = (recordMode == 1)
-                        ? "● ЗАПИСЬ ЛУТА: открой 1-й сундук"
-                        : "● ЗАПИСЬ ЛУТА: найдено " + recordedChestsCount;
-                int bw = client.textRenderer.getWidth(badge) + 12;
-                ctx.fill(8, 8, 8 + bw, 22, 0xCC141820);
-                drawBorder(ctx, 8, 8, bw, 14, recordMode == 1 ? 0xFFFACC15 : 0xFF4ADE80);
-                ctx.drawTextWithShadow(client.textRenderer, badge, 14, 11, recordMode == 1 ? 0xFFFACC15 : 0xFF4ADE80);
-            } else if (target != null) {
-                int dist = (int) Math.hypot(target.x + 0.5 - client.player.getX(), target.z + 0.5 - client.player.getZ());
-                String badge = "★ МАРШРУТ: " + target.name + " (" + dist + " м)";
-                int bw = client.textRenderer.getWidth(badge) + 12;
-                ctx.fill(8, 8, 8 + bw, 22, 0xCC141820);
-                drawBorder(ctx, 8, 8, bw, 14, 0xFFFFD700);
-                ctx.drawTextWithShadow(client.textRenderer, badge, 14, 11, 0xFFFFD700);
-            } else if (finishedBannerTicks > 0) {
-                String badge = "✔ ВСЕ СУНДУКИ СОБРАНЫ!";
-                int bw = client.textRenderer.getWidth(badge) + 12;
-                ctx.fill(8, 8, 8 + bw, 22, 0xCC141820);
-                drawBorder(ctx, 8, 8, bw, 14, 0xFF4ADE80);
-                ctx.drawTextWithShadow(client.textRenderer, badge, 14, 11, 0xFF4ADE80);
+            if (cfg.showBadge) {
+                String badge = null;
+                int badgeColor = themeFull;
+
+                if (recordMode != 0) {
+                    badge = (recordMode == 1)
+                            ? "● ЗАПИСЬ ЛУТА: открой 1-й сундук"
+                            : "● ЗАПИСЬ ЛУТА: найдено " + recordedChestsCount;
+                    badgeColor = (recordMode == 1) ? 0xFFFACC15 : 0xFF4ADE80;
+                } else if (target != null) {
+                    int dist = (int) Math.hypot(target.x + 0.5 - client.player.getX(), target.z + 0.5 - client.player.getZ());
+                    badge = "★ МАРШРУТ: " + target.name + " (" + dist + " м)";
+                } else if (finishedBannerTicks > 0) {
+                    badge = "✔ ВСЕ СУНДУКИ СОБРАНЫ!";
+                    badgeColor = 0xFF4ADE80;
+                }
+
+                if (badge != null) {
+                    int bw = client.textRenderer.getWidth(badge) + 12;
+                    int bx = MathHelper.clamp((int) (sw * cfg.badgeX - bw / 2.0f), 4, sw - bw - 4);
+                    int by = MathHelper.clamp((int) (sh * cfg.badgeY - 7), 4, sh - 18);
+
+                    ctx.fill(bx, by, bx + bw, by + 14, 0xCC12161F);
+                    drawBorder(ctx, bx, by, bw, 14, badgeColor);
+                    ctx.drawTextWithShadow(client.textRenderer, badge, bx + 6, by + 3, badgeColor);
+                }
             }
 
             if (target == null) {
@@ -123,91 +141,98 @@ public class RouteMapClient implements ClientModInitializer {
                 float rawSx = (float) (sw / 2.0 + (rel.x / -rel.z) * scale);
                 float rawSy = (float) (sh / 2.0 - (rel.y / -rel.z) * scale);
 
-                rawSx = Math.max(24f, Math.min(sw - 24f, rawSx));
-                rawSy = Math.max(24f, Math.min(sh - 24f, rawSy));
+                // Безопасная зона отступов сверху (36px) и снизу (46px), чтобы не перекрывать серверный HUD
+                rawSx = Math.max(28f, Math.min(sw - 28f, rawSx));
+                rawSy = Math.max(36f, Math.min(sh - 46f, rawSy));
 
-                float pulse = (float) Math.sin((System.currentTimeMillis() % 1600L) / 1600.0 * Math.PI * 2.0) * 1.5f;
-                float rawBox = (float) MathHelper.clamp(120.0 / (dist + 4.5), 6.0, 22.0) + pulse;
-
-                if (lastAnimatedTarget != target || smoothSx < 0) {
+                float rawBox = (float) MathHelper.clamp(115.0 / (dist + 4.5), 6.0, 20.0);
+                if (cfg.smoothAnim) {
+                    float pulse = (float) Math.sin((System.currentTimeMillis() % 1600L) / 1600.0 * Math.PI * 2.0) * 1.5f;
+                    rawBox += pulse;
+                    if (lastAnimatedTarget != target || smoothSx < 0) {
+                        smoothSx = rawSx;
+                        smoothSy = rawSy;
+                        smoothBox = rawBox;
+                        lastAnimatedTarget = target;
+                    } else {
+                        smoothSx = MathHelper.lerp(0.35f, smoothSx, rawSx);
+                        smoothSy = MathHelper.lerp(0.35f, smoothSy, rawSy);
+                        smoothBox = MathHelper.lerp(0.20f, smoothBox, rawBox);
+                    }
+                } else {
+                    // Мгновенная жёсткая привязка к сундуку без анимации и задержек
                     smoothSx = rawSx;
                     smoothSy = rawSy;
                     smoothBox = rawBox;
                     lastAnimatedTarget = target;
-                } else {
-                    smoothSx = MathHelper.lerp(0.35f, smoothSx, rawSx);
-                    smoothSy = MathHelper.lerp(0.35f, smoothSy, rawSy);
-                    smoothBox = MathHelper.lerp(0.20f, smoothBox, rawBox);
                 }
 
                 int sx = Math.round(smoothSx);
                 int sy = Math.round(smoothSy);
                 int box = Math.round(smoothBox);
 
-                float alphaFactor = (float) MathHelper.clamp((dist - 1.2) / 2.5, 0.25, 1.0);
-                int mainAlpha = ((int) (255 * alphaFactor)) << 24;
-                int softAlpha = ((int) (90 * alphaFactor)) << 24;
-                int goldMain = mainAlpha | 0xFFD700;
-                int goldSoft = softAlpha | 0xFFD700;
+                int mainColor = 0xFF000000 | themeRgb;
+                int softColor = 0x66000000 | themeRgb;
 
-                int beamH = (int) MathHelper.clamp(dist * 1.2, 12, 42);
-                ctx.fill(sx - 1, Math.max(10, sy - box - beamH), sx + 1, sy - box, goldSoft);
+                // Короткий луч над сундуком (не уходит в верхнюю панель)
+                int beamH = (int) MathHelper.clamp(dist * 0.8, 8, 24);
+                ctx.fill(sx - 1, Math.max(32, sy - box - beamH), sx + 1, sy - box, softColor);
 
+                // Уголки прицела
                 int corner = Math.max(3, box / 2);
-                ctx.fill(sx - box, sy - box, sx - box + corner, sy - box + 2, goldMain);
-                ctx.fill(sx - box, sy - box, sx - box + 2, sy - box + corner, goldMain);
-                ctx.fill(sx + box - corner, sy - box, sx + box, sy - box + 2, goldMain);
-                ctx.fill(sx + box - 2, sy - box, sx + box, sy - box + corner, goldMain);
-                ctx.fill(sx - box, sy + box - 2, sx - box + corner, sy + box, goldMain);
-                ctx.fill(sx - box, sy + box - corner, sx - box + 2, sy + box, goldMain);
-                ctx.fill(sx + box - corner, sy + box - 2, sx + box, sy + box, goldMain);
-                ctx.fill(sx + box - 2, sy + box - corner, sx + box, sy + box, goldMain);
+                ctx.fill(sx - box, sy - box, sx - box + corner, sy - box + 2, mainColor);
+                ctx.fill(sx - box, sy - box, sx - box + 2, sy - box + corner, mainColor);
+                ctx.fill(sx + box - corner, sy - box, sx + box, sy - box + 2, mainColor);
+                ctx.fill(sx + box - 2, sy - box, sx + box, sy - box + corner, mainColor);
+                ctx.fill(sx - box, sy + box - 2, sx - box + corner, sy + box, mainColor);
+                ctx.fill(sx - box, sy + box - corner, sx - box + 2, sy + box, mainColor);
+                ctx.fill(sx + box - corner, sy + box - 2, sx + box, sy + box, mainColor);
+                ctx.fill(sx + box - 2, sy + box - corner, sx + box, sy + box, mainColor);
 
+                // Подпись
                 String label = "★ " + target.name + " • " + (int) dist + " м";
                 int tw = client.textRenderer.getWidth(label);
                 int lx = Math.max(6, Math.min(sw - tw - 6, sx - tw / 2));
-                int ly = Math.max(8, sy - box - 16);
+                int ly = Math.max(28, sy - box - 15);
 
-                int bgAlpha = ((int) (190 * alphaFactor)) << 24;
-                ctx.fill(lx - 4, ly - 2, lx + tw + 4, ly + 10, bgAlpha | 0x0D1117);
-                drawBorder(ctx, lx - 4, ly - 2, tw + 8, 12, goldSoft);
-                ctx.drawTextWithShadow(client.textRenderer, label, lx, ly, goldMain);
+                ctx.fill(lx - 4, ly - 2, lx + tw + 4, ly + 10, 0xCC0D1117);
+                drawBorder(ctx, lx - 4, ly - 2, tw + 8, 12, softColor);
+                ctx.drawTextWithShadow(client.textRenderer, label, lx, ly, mainColor);
             } else {
                 lastAnimatedTarget = null;
                 String backLabel = "▼ " + target.name + " сзади • " + (int) dist + " м";
                 int tw = client.textRenderer.getWidth(backLabel);
-                int lx = (sw - tw) / 2;
-                int ly = sh - 54;
+                int lx = MathHelper.clamp((int) (sw * cfg.backX - tw / 2.0f), 6, sw - tw - 6);
+                int ly = MathHelper.clamp((int) (sh * cfg.backY - 6), 6, sh - 16);
+
                 ctx.fill(lx - 5, ly - 2, lx + tw + 5, ly + 10, 0xCC0D1117);
-                drawBorder(ctx, lx - 5, ly - 2, tw + 10, 12, 0xAAFFD700);
-                ctx.drawTextWithShadow(client.textRenderer, backLabel, lx, ly, 0xFFFFD700);
-            }
-        });
-
-        ClientTickEvents.END_CLIENT_TICK.register(client -> {
-            if (client.player == null || client.world == null) return;
-
-            if (finishedBannerTicks > 0) {
-                finishedBannerTicks--;
-            }
-
-            while (openMapKey.wasPressed()) {
-                client.setScreen(new FullMapScreen());
-            }
-            while (addMarkKey.wasPressed()) {
-                client.setScreen(new AddMarkScreen(
-                        (int) Math.floor(client.player.getX()),
-                        (int) Math.floor(client.player.getY()),
-                        (int) Math.floor(client.player.getZ())
-                ));
-            }
-
-            checkOpenedContainer(client);
-
-            tickCounter++;
-            if (tickCounter >= 10) {
-                tickCounter = 0;
-                recordStep(client);
+drawBorder(ctx, lx - 5, ly - 2, tw + 10, 12, 0xAA000000 | themeRgb);
+ctx.drawTextWithShadow(client.textRenderer, backLabel, lx, ly, themeFull);
+}
+});
+ClientTickEvents.END_CLIENT_TICK.register(client -> {
+if (client.player == null || client.world == null) return;
+if (finishedBannerTicks > 0) {
+finishedBannerTicks--;
+}
+while (openMapKey.wasPressed()) {
+client.setScreen(new FullMapScreen());
+}
+while (addMarkKey.wasPressed()) {
+client.setScreen(new AddMarkScreen(
+(int) Math.floor(client.player.getX()),
+(int) Math.floor(client.player.getY()),
+(int) Math.floor(client.player.getZ())
+));
+}
+while (settingsKey.wasPressed()) {
+client.setScreen(new HudSettingsScreen(null));
+}
+checkOpenedContainer(client);
+tickCounter++;
+if (tickCounter >= 10) {
+tickCounter = 0;
+recordStep(client);
 scanTerrain(client);
 }
 terrainSaveCounter++;
@@ -364,7 +389,162 @@ list.remove(0);
 MapStorage.save();
 }
 }
-// ================= СТИЛЬНЫЙ ЭКРАН КАРТЫ v3.0 =================
+// ================= ЭКРАН НАСТРОЕК ИНТЕРФЕЙСА (КЛАВИША N ИЛИ КНОПКА ⚙) =================
+public static class HudSettingsScreen extends Screen {
+private final Screen parent;
+private int draggingItem = 0; // 0 = нет, 1 = тащим верхний бейдж, 2 = тащим плашку "сзади"
+public static class SetBtn {
+public final int x, y, w, h, color;
+public final String label;
+public final Runnable action;
+public SetBtn(int x, int y, int w, int h, String label, int color, Runnable action) {
+this.x = x;
+this.y = y;
+this.w = w;
+this.h = h;
+this.label = label;
+this.color = color;
+this.action = action;
+}
+public boolean contains(double mx, double my) {
+return mx >= x && mx <= x + w && my >= y && my <= y + h;
+}
+}
+private SetBtn[] setButtons = new SetBtn;
+public HudSettingsScreen(Screen parent) {
+super(Text.literal("Настройки интерфейса"));
+this.parent = parent;
+}
+private void rebuildSetButtons() {
+int cx = width / 2;
+int cy = height / 2;
+MapStorage.HudConfig cfg = MapStorage.data.config;
+int themeFull = 0xFF000000 | getThemeRgb();
+String themeName = THEME_NAMES[Math.abs(cfg.themeIndex) % THEME_NAMES.length];
+setButtons = new SetBtn[] {
+new SetBtn(cx - 115, cy - 35, 230, 22, "Цвет элементов: " + themeName, themeFull, () -> {
+cfg.themeIndex = (cfg.themeIndex + 1) % THEME_NAMES.length;
+MapStorage.save();
+}),
+new SetBtn(cx - 115, cy - 8, 230, 22,
+"Анимация подсветки: " + (cfg.smoothAnim ? "§aВКЛ" : "§cВЫКЛ (чёткая)"),
+0xFFE2E8F0, () -> {
+cfg.smoothAnim = !cfg.smoothAnim;
+MapStorage.save();
+}),
+new SetBtn(cx - 115, cy + 19, 230, 22,
+"Плашка статуса: " + (cfg.showBadge ? "§aПОКАЗЫВАТЬ" : "§cСКРЫТА"),
+0xFFE2E8F0, () -> {
+cfg.showBadge = !cfg.showBadge;
+MapStorage.save();
+}),
+new SetBtn(cx - 115, cy + 48, 112, 22, "Сброс позиций", 0xFFF87171, () -> {
+cfg.badgeX = 0.50f;
+cfg.badgeY = 0.08f;
+cfg.backX = 0.50f;
+cfg.backY = 0.82f;
+MapStorage.save();
+}),
+new SetBtn(cx + 3, cy + 48, 112, 22, "Готово", 0xFF4ADE80, () -> {
+if (client != null) client.setScreen(parent);
+})
+};
+}
+@Override
+public boolean mouseClicked(Click click, boolean doubled) {
+double mx = click.x();
+double my = click.y();
+MapStorage.HudConfig cfg = MapStorage.data.config;
+if (click.button() == 0) {
+for (SetBtn btn : setButtons) {
+if (btn.contains(mx, my)) {
+btn.action.run();
+return true;
+}
+}
+// Проверяем захват перетаскиваемой плашки статуса
+String sampleBadge = "★ МАРШРУТ: Сундук #1 (45 м)";
+int bw = textRenderer.getWidth(sampleBadge) + 12;
+int bx = MathHelper.clamp((int) (width * cfg.badgeX - bw / 2.0f), 4, width - bw - 4);
+int by = MathHelper.clamp((int) (height * cfg.badgeY - 7), 4, height - 18);
+if (mx >= bx && mx <= bx + bw && my >= by && my <= by + 14) {
+draggingItem = 1;
+return true;
+}
+// Проверяем захват перетаскиваемой плашки "сзади"
+String sampleBack = "▼ Сундук #1 сзади • 30 м";
+int backW = textRenderer.getWidth(sampleBack) + 10;
+int backX = MathHelper.clamp((int) (width * cfg.backX - backW / 2.0f), 6, width - backW - 6);
+int backY = MathHelper.clamp((int) (height * cfg.backY - 6), 6, height - 16);
+if (mx >= backX && mx <= backX + backW && my >= backY && my <= backY + 12) {
+draggingItem = 2;
+return true;
+}
+}
+return super.mouseClicked(click, doubled);
+}
+@Override
+public boolean mouseDragged(Click click, double deltaX, double deltaY) {
+MapStorage.HudConfig cfg = MapStorage.data.config;
+if (draggingItem == 1) {
+cfg.badgeX = MathHelper.clamp((float) (click.x() / width), 0.05f, 0.95f);
+cfg.badgeY = MathHelper.clamp((float) (click.y() / height), 0.02f, 0.95f);
+return true;
+} else if (draggingItem == 2) {
+cfg.backX = MathHelper.clamp((float) (click.x() / width), 0.05f, 0.95f);
+cfg.backY = MathHelper.clamp((float) (click.y() / height), 0.05f, 0.95f);
+return true;
+}
+return super.mouseDragged(click, deltaX, deltaY);
+}
+@Override
+public boolean mouseReleased(Click click) {
+if (draggingItem != 0) {
+draggingItem = 0;
+MapStorage.save();
+return true;
+}
+return super.mouseReleased(click);
+}
+@Override
+public void render(DrawContext ctx, int mouseX, int mouseY, float delta) {
+rebuildSetButtons();
+ctx.fill(0, 0, width, height, 0x9907090D);
+MapStorage.HudConfig cfg = MapStorage.data.config;
+int themeFull = 0xFF000000 | getThemeRgb();
+// Центральное окно настроек
+int cx = width / 2;
+int cy = height / 2;
+ctx.fill(cx - 130, cy - 68, cx + 130, cy + 80, 0xF512161F);
+drawBorder(ctx, cx - 130, cy - 68, 260, 148, themeFull);
+ctx.drawCenteredTextWithShadow(textRenderer, "⚙ Настройки карты и подсветки", cx, cy - 58, themeFull);
+ctx.drawCenteredTextWithShadow(textRenderer, "§7Перетаскивай плашки мышкой прямо по экрану", cx, cy - 47, 0xFF94A3B8);
+for (SetBtn btn : setButtons) {
+boolean hover = btn.contains(mouseX, mouseY);
+ctx.fill(btn.x, btn.y, btn.x + btn.w, btn.y + btn.h, hover ? 0xFF262F40 : 0xFF1A202C);
+drawBorder(ctx, btn.x, btn.y, btn.w, btn.h, hover ? themeFull : 0x66FFFFFF);
+int tw = textRenderer.getWidth(btn.label);
+ctx.drawTextWithShadow(textRenderer, btn.label, btn.x + (btn.w - tw) / 2, btn.y + 7, btn.color);
+}
+// Превью плашки статуса (можно таскать мышкой!)
+String sampleBadge = "★ МАРШРУТ: Сундук #1 (45 м)";
+int bw = textRenderer.getWidth(sampleBadge) + 12;
+int bx = MathHelper.clamp((int) (width * cfg.badgeX - bw / 2.0f), 4, width - bw - 4);
+int by = MathHelper.clamp((int) (height * cfg.badgeY - 7), 4, height - 18);
+ctx.fill(bx, by, bx + bw, by + 14, 0xEE12161F);
+drawBorder(ctx, bx, by, bw, 14, themeFull);
+ctx.drawTextWithShadow(textRenderer, sampleBadge, bx + 6, by + 3, themeFull);
+// Превью плашки "сзади" (тоже можно таскать мышкой!)
+String sampleBack = "▼ Сундук #1 сзади • 30 м";
+int backW = textRenderer.getWidth(sampleBack) + 10;
+int backX = MathHelper.clamp((int) (width * cfg.backX - backW / 2.0f), 6, width - backW - 6);
+int backY = MathHelper.clamp((int) (height * cfg.backY - 6), 6, height - 16);
+ctx.fill(backX, backY, backX + backW, backY + 12, 0xEE0D1117);
+drawBorder(ctx, backX, backY, backW, 12, themeFull);
+ctx.drawTextWithShadow(textRenderer, sampleBack, backX + 5, backY + 2, themeFull);
+}
+}
+// ================= ЭКРАН КАРТЫ =================
 public static class FullMapScreen extends Screen {
 private double centerX, centerZ;
 private double zoom = 1.5;
@@ -387,7 +567,7 @@ public boolean contains(double mx, double my) {
 return mx >= x && mx <= x + w && my >= y && my <= y + h;
 }
 }
-private NavButton[] topNavButtons = new NavButton[0];
+private NavButton[] topNavButtons = new NavButton;
 public FullMapScreen() {
 super(Text.literal("Картограф Мастерской"));
 }
@@ -401,6 +581,7 @@ centerZ = client.player.getZ();
 private void rebuildButtons() {
 int y = 8;
 int h = 20;
+int themeFull = 0xFF000000 | getThemeRgb();
 String recLabel = switch (recordMode) {
 case 1 -> "Жду 1-й сундук...";
 case 2 -> "● Запись (" + recordedChestsCount + ")";
@@ -409,17 +590,17 @@ default -> "Записать лут";
 int recColor = (recordMode == 2) ? 0xFF4ADE80 : (recordMode == 1 ? 0xFFFACC15 : 0xFFE2E8F0);
 MapStorage.Waypoint target = getCurrentRunTarget();
 String runLabel = (target == null) ? "Запустить маршрут" : "★ " + target.name;
-int runColor = (target != null) ? 0xFFFFD700 : 0xFFE2E8F0;
+int runColor = (target != null) ? themeFull : 0xFFE2E8F0;
 topNavButtons = new NavButton[] {
-new NavButton(10, y, 22, h, "+", 0xFF38BDF8, () -> zoom = Math.min(8.0, zoom * 1.4)),
-new NavButton(35, y, 22, h, "-", 0xFF38BDF8, () -> zoom = Math.max(0.25, zoom / 1.4)),
-new NavButton(60, y, 22, h, "Я", 0xFFEF4444, () -> {
+new NavButton(10, y, 20, h, "+", 0xFF38BDF8, () -> zoom = Math.min(8.0, zoom * 1.4)),
+new NavButton(33, y, 20, h, "-", 0xFF38BDF8, () -> zoom = Math.max(0.25, zoom / 1.4)),
+new NavButton(56, y, 20, h, "Я", 0xFFEF4444, () -> {
 if (client != null && client.player != null) {
 centerX = client.player.getX();
 centerZ = client.player.getZ();
 }
 }),
-new NavButton(88, y, 60, h, "+ Метка", 0xFF22D3EE, () -> {
+new NavButton(80, y, 56, h, "+ Метка", 0xFF22D3EE, () -> {
 if (client != null && client.player != null) {
 client.setScreen(new AddMarkScreen(
 (int) Math.floor(client.player.getX()),
@@ -428,7 +609,7 @@ client.setScreen(new AddMarkScreen(
 ));
 }
 }),
-new NavButton(154, y, 102, h, recLabel, recColor, () -> {
+new NavButton(140, y, 96, h, recLabel, recColor, () -> {
 if (recordMode == 0) {
 recordMode = 1;
 activeRunIndex = -1;
@@ -438,7 +619,7 @@ recordMode = 0;
 MapStorage.save();
 }
 }),
-new NavButton(262, y, 118, h, runLabel, runColor, () -> {
+new NavButton(240, y, 112, h, runLabel, runColor, () -> {
 if (activeRunIndex < 0) {
 if (!getChestMarks().isEmpty()) {
 recordMode = 0;
@@ -449,8 +630,11 @@ finishedBannerTicks = 0;
 activeRunIndex = -1;
 }
 }),
-new NavButton(width - 66, y, 56, h, showSidebar ? "Список ▸" : "Список ◂", 0xFFD4AF37, () -> showSidebar = !showSidebar),
-new NavButton(width - 144, y, 72, h, "Сброс лута", 0xFFF87171, () -> {
+new NavButton(width - 28, y, 20, h, "⚙", themeFull, () -> {
+if (client != null) client.setScreen(new HudSettingsScreen(this));
+}),
+new NavButton(width - 86, y, 54, h, showSidebar ? "Список ▸" : "Список ◂", themeFull, () -> showSidebar = !showSidebar),
+new NavButton(width - 158, y, 68, h, "Сброс лута", 0xFFF87171, () -> {
 recordMode = 0;
 activeRunIndex = -1;
 finishedBannerTicks = 0;
@@ -458,7 +642,7 @@ recordedChestsCount = 0;
 MapStorage.data.farmRoute.clear();
 MapStorage.save();
 }),
-new NavButton(width - 230, y, 80, h, "Очистить след", 0xFF94A3B8, () -> {
+new NavButton(width - 238, y, 76, h, "Очистить след", 0xFF94A3B8, () -> {
 MapStorage.data.trail.clear();
 MapStorage.save();
 })
@@ -561,6 +745,8 @@ return true;
 public void render(DrawContext ctx, int mouseX, int mouseY, float delta) {
 rebuildButtons();
 if (client == null || client.player == null) return;
+int themeRgb = getThemeRgb();
+int themeFull = 0xFF000000 | themeRgb;
 ctx.fill(0, 0, width, height, 0xF50B0E14);
 int sidebarW = showSidebar ? 155 : 0;
 int mapRight = width - sidebarW;
@@ -599,7 +785,7 @@ ctx.fill(Math.max(0, sx1), Math.max(36, sy1), Math.min(mapRight, Math.max(sx1 + 
 }
 }
 renderPolyline(ctx, MapStorage.data.trail, midX, midY, mapRight, 0x55FFFFFF, 1);
-renderPolyline(ctx, MapStorage.data.farmRoute, midX, midY, mapRight, 0xFFFFD700, 3);
+renderPolyline(ctx, MapStorage.data.farmRoute, midX, midY, mapRight, themeFull, 3);
 int px = (int) (midX + (client.player.getX() - centerX) * zoom);
 int py = (int) (midY + (client.player.getZ() - centerZ) * zoom);
 MapStorage.Waypoint runTarget = getCurrentRunTarget();
@@ -628,29 +814,29 @@ String tag = isHovered ? wp.name + " (" + wp.x + ", " + wp.z + ")" : wp.name;
 int tw = textRenderer.getWidth(tag);
 if (sx + 8 + tw < mapRight - 4) {
 ctx.fill(sx + 6, sy - 6, sx + 10 + tw, sy + 5, 0xBB0B0E14);
-drawBorder(ctx, sx + 6, sy - 6, tw + 4, 11, isHighlighted ? 0xFFFFD700 : 0x44FFFFFF);
+drawBorder(ctx, sx + 6, sy - 6, tw + 4, 11, isHighlighted ? themeFull : 0x44FFFFFF);
 ctx.drawTextWithShadow(textRenderer, tag, sx + 8, sy - 4, color);
 }
 }
 }
 if (px >= 4 && px <= mapRight - 4 && py >= 38 && py <= height - 22) {
-drawPlayerArrow(ctx, px, py, client.player.getYaw());
+drawPlayerArrow(ctx, px, py, client.player.getYaw(), themeFull);
 }
 ctx.fill(0, 0, width, 36, 0xF212161F);
-ctx.fill(0, 35, width, 36, 0xFFD4AF37);
+ctx.fill(0, 35, width, 36, themeFull);
 for (NavButton btn : topNavButtons) {
 boolean hover = btn.contains(mouseX, mouseY);
 ctx.fill(btn.x, btn.y, btn.x + btn.w, btn.y + btn.h, hover ? 0xFF262F40 : 0xFF1A202C);
-drawBorder(ctx, btn.x, btn.y, btn.w, btn.h, hover ? 0xFFFFD700 : 0x66D4AF37);
+drawBorder(ctx, btn.x, btn.y, btn.w, btn.h, hover ? themeFull : (0x66000000 | themeRgb));
 int tw = textRenderer.getWidth(btn.label);
 ctx.drawTextWithShadow(textRenderer, btn.label, btn.x + (btn.w - tw) / 2, btn.y + 6, btn.accentColor);
 }
 if (showSidebar) {
 int sx = width - sidebarW - 4;
 ctx.fill(sx, 38, width - 4, height - 22, 0xE612161F);
-drawBorder(ctx, sx, 38, sidebarW, height - 60, 0x88D4AF37);
-ctx.drawTextWithShadow(textRenderer, "★ Точки (" + MapStorage.data.marks.size() + ")", sx + 8, 44, 0xFFFFD700);
-ctx.fill(sx + 4, 55, width - 8, 56, 0x44D4AF37);
+drawBorder(ctx, sx, 38, sidebarW, height - 60, 0x88000000 | themeRgb);
+ctx.drawTextWithShadow(textRenderer, "★ Точки (" + MapStorage.data.marks.size() + ")", sx + 8, 44, themeFull);
+ctx.fill(sx + 4, 55, width - 8, 56, 0x44000000 | themeRgb);
 List<MapStorage.Waypoint> marks = MapStorage.data.marks;
 for (int i = listScroll; i < marks.size(); i++) {
 int iy = 58 + (i - listScroll) * 18;
@@ -659,7 +845,7 @@ MapStorage.Waypoint wp = marks.get(i);
 boolean active = (wp == selectedMark || wp == runTarget);
 boolean rowHover = mouseX >= sx && mouseX <= width - 4 && mouseY >= iy && mouseY <= iy + 17;
 if (active || rowHover) {
-ctx.fill(sx + 3, iy, width - 7, iy + 16, active ? 0x44FFD700 : 0x22FFFFFF);
+ctx.fill(sx + 3, iy, width - 7, iy + 16, active ? (0x44000000 | themeRgb) : 0x22FFFFFF);
 }
 int dotColor = switch (wp.type) {
 case "CHEST" -> 0xFFFACC15;
@@ -668,17 +854,17 @@ default -> 0xFF22D3EE;
 };
 ctx.fill(sx + 7, iy + 5, sx + 12, iy + 10, dotColor);
 String shortName = wp.name.length() > 17 ? wp.name.substring(0, 16) + "…" : wp.name;
-ctx.drawTextWithShadow(textRenderer, shortName, sx + 16, iy + 4, active ? 0xFFFFD700 : 0xFFE2E8F0);
+ctx.drawTextWithShadow(textRenderer, shortName, sx + 16, iy + 4, active ? themeFull : 0xFFE2E8F0);
 }
 }
 ctx.fill(0, height - 20, width, height, 0xF212161F);
-ctx.fill(0, height - 20, width, height - 19, 0x88D4AF37);
+ctx.fill(0, height - 20, width, height - 19, 0x88000000 | themeRgb);
 String targetText = "";
 if (lineTarget != null) {
 int dist = (int) Math.hypot(lineTarget.x - client.player.getX(), lineTarget.z - client.player.getZ());
-targetText = "  |  Цель: §6" + lineTarget.name + " (" + dist + " м)§r";
+targetText = "  |  Цель: " + lineTarget.name + " (" + dist + " м)";
 }
-String info = String.format("Позиция: %d, %d%s  |  ЛКМ = выбрать, ПКМ = поставить/удалить",
+String info = String.format("Позиция: %d, %d%s  |  N = настройки HUD",
 (int) client.player.getX(), (int) client.player.getZ(), targetText);
 ctx.drawTextWithShadow(textRenderer, info, 10, height - 14, 0xFFCBD5E1);
 }
@@ -706,14 +892,14 @@ ctx.fill(sx - 1, sy - 1, sx + 1, sy + 1, 0xFFFFFFFF);
 }
 }
 }
-private void drawPlayerArrow(DrawContext ctx, int px, int py, float yaw) {
+private void drawPlayerArrow(DrawContext ctx, int px, int py, float yaw, int themeFull) {
 double rad = Math.toRadians(yaw + 90);
 int tipX = px + (int) Math.round(Math.cos(rad) * 7);
 int tipY = py + (int) Math.round(Math.sin(rad) * 7);
-drawLine(ctx, px, py, tipX, tipY, width, 0xFFFFD700, 2);
+drawLine(ctx, px, py, tipX, tipY, width, themeFull, 2);
 ctx.fill(px - 4, py - 4, px + 4, py + 4, 0xFF000000);
 ctx.fill(px - 3, py - 3, px + 3, py + 3, 0xFFEF4444);
-ctx.fill(tipX - 1, tipY - 1, tipX + 2, tipY + 2, 0xFFFFD700);
+ctx.fill(tipX - 1, tipY - 1, tipX + 2, tipY + 2, themeFull);
 }
 private void renderPolyline(DrawContext ctx, List<MapStorage.RoutePoint> list, int midX, int midY, int maxX, int color, int thickness) {
 for (int i = 1; i < list.size(); i++) {
@@ -742,7 +928,7 @@ if (e2 <= dx) { err += dx; y0 += sy; }
 }
 }
 }
-// ================= СТИЛЬНОЕ ОКНО СОЗДАНИЯ МЕТКИ =================
+// ================= ОКНО СОЗДАНИЯ МЕТКИ =================
 public static class AddMarkScreen extends Screen {
 private TextFieldWidget nameField;
 private final int targetX, targetY, targetZ;
@@ -763,7 +949,7 @@ public boolean contains(double mx, double my) {
 return mx >= x && mx <= x + w && my >= y && my <= y + h;
 }
 }
-private DialogButton[] dialogButtons = new DialogButton[0];
+private DialogButton[] dialogButtons = new DialogButton;
 public AddMarkScreen(int x, int y, int z) {
 super(Text.literal("Новая метка"));
 this.targetX = x;
@@ -781,22 +967,20 @@ setInitialFocus(nameField);
 dialogButtons = new DialogButton[] {
 new DialogButton(cx - 105, cy + 8, 66, 22, "Сундук", 0xFFFACC15, () -> saveMark("CHEST")),
 new DialogButton(cx - 33, cy + 8, 66, 22, "Ферма", 0xFF4ADE80, () -> saveMark("FARM")),
-new DialogButton(cx + 39, cy + 8, 66, 22, "Точка", 0xFF22D3EE, () -> saveMark("POINT"))
+new DialogButton(cx
+• 39, cy + 8, 66, 22, "Точка", 0xFF22D3EE, () -> saveMark("POINT"))
 };
-}
-@Override
+}@Override
 public boolean mouseClicked(Click click, boolean doubled) {
 if (click.button() == 0) {
 for (DialogButton btn : dialogButtons) {
-if (btn.contains(click.x(), click.y())) {
-btn.action.run();
+if (btn.contains(click.x(), click.y())) {btn.action.run();
 return true;
 }
 }
 }
 return super.mouseClicked(click, doubled);
-}
-private void saveMark(String type) {
+}private void saveMark(String type) {
 String title = nameField.getText().trim();
 if (title.isEmpty()) {
 title = switch (type) {
@@ -807,23 +991,18 @@ default -> "Точка";
 }
 MapStorage.Waypoint wp = new MapStorage.Waypoint(title, type, targetX, targetY, targetZ);
 MapStorage.data.marks.add(wp);
-selectedMark = wp;
-MapStorage.save();
+selectedMark = wp;MapStorage.save();
 if (client != null) client.setScreen(new FullMapScreen());
-}
-@Override
+}@Override
 public void render(DrawContext ctx, int mouseX, int mouseY, float delta) {
 ctx.fill(0, 0, width, height, 0xBB07090D);
-int cx = width / 2;
+int themeFull = 0xFF000000 | getThemeRgb();int cx = width / 2;
 int cy = height / 2;
 ctx.fill(cx - 120, cy - 55, cx + 120, cy + 44, 0xF512161F);
-drawBorder(ctx, cx - 120, cy - 55, 240, 99, 0xFFD4AF37);
-super.render(ctx, mouseX, mouseY, delta);
-ctx.drawCenteredTextWithShadow(textRenderer, "★ Новая метка (" + targetX + ", " + targetZ + ")", cx, cy - 42, 0xFFFFD700);
-for (DialogButton btn : dialogButtons) {
+drawBorder(ctx, cx - 120, cy - 55, 240, 99, themeFull);super.render(ctx, mouseX, mouseY, delta);ctx.drawCenteredTextWithShadow(textRenderer, "★ Новая метка (" + targetX + ", " + targetZ + ")", cx, cy - 42, themeFull);for (DialogButton btn : dialogButtons) {
 boolean hover = btn.contains(mouseX, mouseY);
 ctx.fill(btn.x, btn.y, btn.x + btn.w, btn.y + btn.h, hover ? 0xFF262F40 : 0xFF1A202C);
-drawBorder(ctx, btn.x, btn.y, btn.w, btn.h, hover ? btn.color : 0x66D4AF37);
+drawBorder(ctx, btn.x, btn.y, btn.w, btn.h, hover ? btn.color : (0x66000000 | getThemeRgb()));
 int tw = textRenderer.getWidth(btn.label);
 ctx.drawTextWithShadow(textRenderer, btn.label, btn.x + (btn.w - tw) / 2, btn.y + 7, btn.color);
 }
