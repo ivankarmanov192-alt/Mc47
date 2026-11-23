@@ -21,6 +21,7 @@ import net.minecraft.text.Text;
 import net.minecraft.util.hit.BlockHitResult;
 import net.minecraft.util.hit.HitResult;
 import net.minecraft.util.math.BlockPos;
+import net.minecraft.util.math.MathHelper;
 import net.minecraft.util.math.Vec3d;
 import net.minecraft.world.Heightmap;
 import net.minecraft.world.World;
@@ -43,8 +44,13 @@ public class RouteMapClient implements ClientModInitializer {
 
     // Режим прохождения записанного маршрута (-1 = выключен, 0+ = индекс текущего сундука)
     private static int activeRunIndex = -1;
-    // Таймер отображения плашки "Все сундуки собраны!" (в тиках, 80 тиков = 4 сек)
     private static int finishedBannerTicks = 0;
+
+    // Переменные для плавной анимации маркера на экране
+    private static float smoothSx = -1f;
+    private static float smoothSy = -1f;
+    private static float smoothBox = 12f;
+    private static MapStorage.Waypoint lastAnimatedTarget = null;
 
     private int tickCounter = 0;
     private int terrainSaveCounter = 0;
@@ -61,7 +67,7 @@ public class RouteMapClient implements ClientModInitializer {
                 "key.routemap.mark", InputUtil.Type.KEYSYM, GLFW.GLFW_KEY_B, KeyBinding.Category.MISC
         ));
 
-        // HUD-рендер: 3D-рамка целевого сундука + аккуратный бейдж статуса
+        // HUD-рендер: плавная анимация подсветки сундука + стильный бейдж статуса
         HudRenderCallback.EVENT.register((ctx, renderTickCounter) -> {
             MinecraftClient client = MinecraftClient.getInstance();
             if (client.player == null || client.world == null || client.currentScreen != null) return;
@@ -69,7 +75,6 @@ public class RouteMapClient implements ClientModInitializer {
             int sw = client.getWindow().getScaledWidth();
             int sh = client.getWindow().getScaledHeight();
 
-            // 1. Бейдж статуса в левом верхнем углу
             MapStorage.Waypoint target = getCurrentRunTarget();
             if (recordMode != 0) {
                 String badge = (recordMode == 1)
@@ -94,11 +99,14 @@ public class RouteMapClient implements ClientModInitializer {
                 ctx.drawTextWithShadow(client.textRenderer, badge, 14, 11, 0xFF4ADE80);
             }
 
-            // 2. 3D-подсветка целевого сундука в мире
-            if (target == null) return;
+            if (target == null) {
+                lastAnimatedTarget = null;
+                return;
+            }
 
             Camera camera = client.gameRenderer.getCamera();
-            Vec3d camPos = client.player.getEyePos();
+            float tickDelta = renderTickCounter.getTickProgress(true);
+            Vec3d camPos = client.player.getCameraPosVec(tickDelta);
 
             double dx = (target.x + 0.5) - camPos.x;
             double dy = (target.y + 0.5) - camPos.y;
@@ -113,28 +121,69 @@ public class RouteMapClient implements ClientModInitializer {
                 double fov = Math.toRadians(client.options.getFov().getValue());
                 double scale = (sh / 2.0) / Math.tan(fov / 2.0);
 
-                int sx = (int) (sw / 2.0 + (rel.x / -rel.z) * scale);
-                int sy = (int) (sh / 2.0 - (rel.y / -rel.z) * scale);
+                float rawSx = (float) (sw / 2.0 + (rel.x / -rel.z) * scale);
+                float rawSy = (float) (sh / 2.0 - (rel.y / -rel.z) * scale);
 
-                sx = Math.max(24, Math.min(sw - 24, sx));
-                sy = Math.max(24, Math.min(sh - 24, sy));
+                rawSx = Math.max(24f, Math.min(sw - 24f, rawSx));
+                rawSy = Math.max(24f, Math.min(sh - 24f, rawSy));
 
-                int box = (int) Math.max(7, Math.min(28, 140.0 / Math.max(3.0, dist)));
+                // Плавное масштабирование без резких скачков при приближении
+                float pulse = (float) Math.sin((System.currentTimeMillis() % 1600L) / 1600.0 * Math.PI * 2.0) * 1.5f;
+                float rawBox = (float) MathHelper.clamp(120.0 / (dist + 4.5), 6.0, 22.0) + pulse;
 
-                ctx.fill(sx - 1, Math.max(10, sy - box - 48), sx + 1, sy - box, 0x99FFD700);
-                ctx.fill(sx - box, sy - box, sx + box, sy + box, 0x26FFD700);
-                drawBorder(ctx, sx - box, sy - box, box * 2, box * 2, 0xFFFFD700);
-                drawBorder(ctx, sx - box - 2, sy - box - 2, box * 2 + 4, box * 2 + 4, 0x66FFD700);
+                if (lastAnimatedTarget != target || smoothSx < 0) {
+                    smoothSx = rawSx;
+                    smoothSy = rawSy;
+                    smoothBox = rawBox;
+                    lastAnimatedTarget = target;
+                } else {
+                    smoothSx = MathHelper.lerp(0.35f, smoothSx, rawSx);
+                    smoothSy = MathHelper.lerp(0.35f, smoothSy, rawSy);
+                    smoothBox = MathHelper.lerp(0.20f, smoothBox, rawBox);
+                }
 
+                int sx = Math.round(smoothSx);
+                int sy = Math.round(smoothSy);
+                int box = Math.round(smoothBox);
+
+                // Плавное затухание при приближении вплотную (< 3.5 м), чтобы не перекрывать сам сундук
+                float alphaFactor = (float) MathHelper.clamp((dist - 1.2) / 2.5, 0.25, 1.0);
+                int mainAlpha = ((int) (255 * alphaFactor)) << 24;
+                int softAlpha = ((int) (90 * alphaFactor)) << 24;
+                int goldMain = mainAlpha | 0xFFD700;
+                int goldSoft = softAlpha | 0xFFD700;
+
+                // Мягкий вертикальный луч над сундуком
+                int beamH = (int) MathHelper.clamp(dist * 1.2, 12, 42);
+                ctx.fill(sx - 1, Math.max(10, sy - box - beamH), sx + 1, sy - box, goldSoft);
+
+                // Аккуратные светящиеся уголки прицела вместо грубого сплошного квадрата
+                int corner = Math.max(3, box / 2);
+                // Верх-лево
+                ctx.fill(sx - box, sy - box, sx - box + corner, sy - box + 2, goldMain);
+                ctx.fill(sx - box, sy - box, sx - box + 2, sy - box + corner, goldMain);
+                // Верх-право
+                ctx.fill(sx + box - corner, sy - box, sx + box, sy - box + 2, goldMain);
+                ctx.fill(sx + box - 2, sy - box, sx + box, sy - box + corner, goldMain);
+                // Низ-лево
+                ctx.fill(sx - box, sy + box - 2, sx - box + corner, sy + box, goldMain);
+                ctx.fill(sx - box, sy + box - corner, sx - box + 2, sy + box, goldMain);
+                // Низ-право
+                ctx.fill(sx + box - corner, sy + box - 2, sx + box, sy + box, goldMain);
+                ctx.fill(sx + box - 2, sy + box - corner, sx + box, sy + box, goldMain);
+
+                // Плашка с названием и дистанцией
                 String label = "★ " + target.name + " • " + (int) dist + " м";
                 int tw = client.textRenderer.getWidth(label);
                 int lx = Math.max(6, Math.min(sw - tw - 6, sx - tw / 2));
                 int ly = Math.max(8, sy - box - 16);
 
-                ctx.fill(lx - 4, ly - 2, lx + tw + 4, ly + 10, 0xCC0D1117);
-                drawBorder(ctx, lx - 4, ly - 2, tw + 8, 12, 0xAAFFD700);
-                ctx.drawTextWithShadow(client.textRenderer, label, lx, ly, 0xFFFFD700);
+                int bgAlpha = ((int) (190 * alphaFactor)) << 24;
+                ctx.fill(lx - 4, ly - 2, lx + tw + 4, ly + 10, bgAlpha | 0x0D1117);
+                drawBorder(ctx, lx - 4, ly - 2, tw + 8, 12, goldSoft);
+                ctx.drawTextWithShadow(client.textRenderer, label, lx, ly, goldMain);
             } else {
+                lastAnimatedTarget = null;
                 String backLabel = "▼ " + target.name + " сзади • " + (int) dist + " м";
                 int tw = client.textRenderer.getWidth(backLabel);
                 int lx = (sw - tw) / 2;
@@ -152,79 +201,68 @@ public class RouteMapClient implements ClientModInitializer {
                 finishedBannerTicks--;
             }
 
-            while (openMapKey.wasPressed()) {
-                client.setScreen(new FullMapScreen());
-            }
-            while (addMarkKey.wasPressed()) {
-                client.setScreen(new AddMarkScreen(
-                        (int) Math.floor(client.player.getX()),
-                        (int) Math.floor(client.player.getY()),
-                        (int) Math.floor(client.player.getZ())
-                ));
-            }
-
-            checkOpenedContainer(client);
-
-            tickCounter++;
-            if (tickCounter >= 10) {
-                tickCounter = 0;
-                recordStep(client);
-                scanTerrain(client);
-            }
-
-            terrainSaveCounter++;
-            if (terrainSaveCounter >= 200 && terrainDirty) {
-                terrainSaveCounter = 0;
-                terrainDirty = false;
-                MapStorage.saveTerrain();
-            }
-        });
-    }
-
-    private static void drawBorder(DrawContext ctx, int x, int y, int w, int h, int color) {
-        ctx.fill(x, y, x + w, y + 1, color);
-        ctx.fill(x, y + h - 1, x + w, y + h, color);
-        ctx.fill(x, y, x + 1, y + h, color);
-        ctx.fill(x + w - 1, y, x + w, y + h, color);
-    }
-
-    private static List<MapStorage.Waypoint> getChestMarks() {
-        List<MapStorage.Waypoint> chests = new ArrayList<>();
-        for (MapStorage.Waypoint wp : MapStorage.data.marks) {
-            if ("CHEST".equals(wp.type)) {
-                chests.add(wp);
-            }
-        }
-        return chests;
-    }
-
-    private static MapStorage.Waypoint getCurrentRunTarget() {
-        if (activeRunIndex < 0) return null;
-        List<MapStorage.Waypoint> chests = getChestMarks();
-        if (chests.isEmpty() || activeRunIndex >= chests.size()) {
-            activeRunIndex = -1;
-            return null;
-        }
-        return chests.get(activeRunIndex);
-    }
-
-    private void checkOpenedContainer(MinecraftClient client) {
-        if (client.player == null) {
-            lastHandledScreen = null;
-            return;
-        }
-
-        Screen current = client.currentScreen;
-        if (current instanceof HandledScreen<?> && !(current instanceof InventoryScreen) && !(current instanceof CreativeInventoryScreen)) {
-            if (current != lastHandledScreen) {
-                lastHandledScreen = current;
-
-                BlockPos targetPos = client.player.getBlockPos();
-                if (client.crosshairTarget != null && client.crosshairTarget.getType() == HitResult.Type.BLOCK) {
-                    targetPos = ((BlockHitResult) client.crosshairTarget).getBlockPos();
-                }
-
-// А. Если запущено ПРОХОЖДЕНИЕ маршрута
+while (openMapKey.wasPressed()) {
+client.setScreen(new FullMapScreen());
+}
+while (addMarkKey.wasPressed()) {
+client.setScreen(new AddMarkScreen(
+(int) Math.floor(client.player.getX()),
+(int) Math.floor(client.player.getY()),
+(int) Math.floor(client.player.getZ())
+));
+}
+checkOpenedContainer(client);
+tickCounter++;
+if (tickCounter >= 10) {
+tickCounter = 0;
+recordStep(client);
+scanTerrain(client);
+}
+terrainSaveCounter++;
+if (terrainSaveCounter >= 200 && terrainDirty) {
+terrainSaveCounter = 0;
+terrainDirty = false;
+MapStorage.saveTerrain();
+}
+});
+}
+private static void drawBorder(DrawContext ctx, int x, int y, int w, int h, int color) {
+ctx.fill(x, y, x + w, y + 1, color);
+ctx.fill(x, y + h - 1, x + w, y + h, color);
+ctx.fill(x, y, x + 1, y + h, color);
+ctx.fill(x + w - 1, y, x + w, y + h, color);
+}
+private static List<MapStorage.Waypoint> getChestMarks() {
+List<MapStorage.Waypoint> chests = new ArrayList<>();
+for (MapStorage.Waypoint wp : MapStorage.data.marks) {
+if ("CHEST".equals(wp.type)) {
+chests.add(wp);
+}
+}
+return chests;
+}
+private static MapStorage.Waypoint getCurrentRunTarget() {
+if (activeRunIndex < 0) return null;
+List<MapStorage.Waypoint> chests = getChestMarks();
+if (chests.isEmpty() || activeRunIndex >= chests.size()) {
+activeRunIndex = -1;
+return null;
+}
+return chests.get(activeRunIndex);
+}
+private void checkOpenedContainer(MinecraftClient client) {
+if (client.player == null) {
+lastHandledScreen = null;
+return;
+}
+Screen current = client.currentScreen;
+if (current instanceof HandledScreen<?> && !(current instanceof InventoryScreen) && !(current instanceof CreativeInventoryScreen)) {
+if (current != lastHandledScreen) {
+lastHandledScreen = current;
+BlockPos targetPos = client.player.getBlockPos();
+if (client.crosshairTarget != null && client.crosshairTarget.getType() == HitResult.Type.BLOCK) {
+targetPos = ((BlockHitResult) client.crosshairTarget).getBlockPos();
+}
 MapStorage.Waypoint runTarget = getCurrentRunTarget();
 if (runTarget != null) {
 double d = Math.hypot(client.player.getX() - (runTarget.x + 0.5), client.player.getZ() - (runTarget.z + 0.5));
@@ -233,10 +271,9 @@ if (d <= 6.5 || dBlock <= 4.0) {
 List<MapStorage.Waypoint> chests = getChestMarks();
 activeRunIndex++;
 if (activeRunIndex >= chests.size()) {
-// Все сундуки собраны! Отключаем подсветку и выводим крупное уведомление на экран
 activeRunIndex = -1;
 selectedMark = null;
-finishedBannerTicks = 100; // 5 секунд плашка в углу
+finishedBannerTicks = 100;
 client.inGameHud.setTitleTicks(5, 45, 10);
 client.inGameHud.setTitle(Text.literal("§6★ Все сундуки собраны! ★"));
 client.inGameHud.setSubtitle(Text.literal("§aМаршрут фарма завершён"));
@@ -246,7 +283,6 @@ client.player.sendMessage(Text.literal("§6[Мастерская] §aСобра�
 }
 }
 }
-// Б. Если включена ЗАПИСЬ нового маршрута
 if (recordMode != 0) {
 if (recordMode == 1) {
 recordMode = 2;
@@ -342,12 +378,24 @@ private double centerX, centerZ;
 private double zoom = 1.5;
 private boolean showSidebar = true;
 private int listScroll = 0;
-private record UiBtn(int x, int y, int w, int h, String label, int accentColor, Runnable action) {
-boolean contains(double mx, double my) {
+public static class NavButton {
+public final int x, y, w, h, accentColor;
+public final String label;
+public final Runnable action;
+public NavButton(int x, int y, int w, int h, String label, int accentColor, Runnable action) {
+this.x = x;
+this.y = y;
+this.w = w;
+this.h = h;
+this.label = label;
+this.accentColor = accentColor;
+this.action = action;
+}
+public boolean contains(double mx, double my) {
 return mx >= x && mx <= x + w && my >= y && my <= y + h;
 }
 }
-private final List buttons = new ArrayList<>();
+private final List topNavButtons = new ArrayList<>();
 public FullMapScreen() {
 super(Text.literal("Картограф Мастерской"));
 }
@@ -359,18 +407,18 @@ centerZ = client.player.getZ();
 }
 }
 private void rebuildButtons() {
-buttons.clear();
+topNavButtons.clear();
 int y = 8;
 int h = 20;
-buttons.add(new UiBtn(10, y, 22, h, "+", 0xFF38BDF8, () -> zoom = Math.min(8.0, zoom * 1.4)));
-buttons.add(new UiBtn(35, y, 22, h, "-", 0xFF38BDF8, () -> zoom = Math.max(0.25, zoom / 1.4)));
-buttons.add(new UiBtn(60, y, 22, h, "Я", 0xFFEF4444, () -> {
+topNavButtons.add(new NavButton(10, y, 22, h, "+", 0xFF38BDF8, () -> zoom = Math.min(8.0, zoom * 1.4)));
+topNavButtons.add(new NavButton(35, y, 22, h, "-", 0xFF38BDF8, () -> zoom = Math.max(0.25, zoom / 1.4)));
+topNavButtons.add(new NavButton(60, y, 22, h, "Я", 0xFFEF4444, () -> {
 if (client != null && client.player != null) {
 centerX = client.player.getX();
 centerZ = client.player.getZ();
 }
 }));
-buttons.add(new UiBtn(88, y, 60, h, "+ Метка", 0xFF22D3EE, () -> {
+topNavButtons.add(new NavButton(88, y, 60, h, "+ Метка", 0xFF22D3EE, () -> {
 if (client != null && client.player != null) {
 client.setScreen(new AddMarkScreen(
 (int) Math.floor(client.player.getX()),
@@ -385,7 +433,7 @@ case 2 -> "● Запись (" + recordedChestsCount + ")";
 default -> "Записать лут";
 };
 int recColor = (recordMode == 2) ? 0xFF4ADE80 : (recordMode == 1 ? 0xFFFACC15 : 0xFFE2E8F0);
-buttons.add(new UiBtn(154, y, 102, h, recLabel, recColor, () -> {
+topNavButtons.add(new NavButton(154, y, 102, h, recLabel, recColor, () -> {
 if (recordMode == 0) {
 recordMode = 1;
 activeRunIndex = -1;
@@ -398,7 +446,7 @@ MapStorage.save();
 MapStorage.Waypoint target = getCurrentRunTarget();
 String runLabel = (target == null) ? "Запустить маршрут" : "★ " + target.name;
 int runColor = (target != null) ? 0xFFFFD700 : 0xFFE2E8F0;
-buttons.add(new UiBtn(262, y, 118, h, runLabel, runColor, () -> {
+topNavButtons.add(new NavButton(262, y, 118, h, runLabel, runColor, () -> {
 if (activeRunIndex < 0) {
 if (!getChestMarks().isEmpty()) {
 recordMode = 0;
@@ -409,8 +457,8 @@ finishedBannerTicks = 0;
 activeRunIndex = -1;
 }
 }));
-buttons.add(new UiBtn(width - 66, y, 56, h, showSidebar ? "Список ▸" : "Список ◂", 0xFFD4AF37, () -> showSidebar = !showSidebar));
-buttons.add(new UiBtn(width - 144, y, 72, h, "Сброс лута", 0xFFF87171, () -> {
+topNavButtons.add(new NavButton(width - 66, y, 56, h, showSidebar ? "Список ▸" : "Список ◂", 0xFFD4AF37, () -> showSidebar = !showSidebar));
+topNavButtons.add(new NavButton(width - 144, y, 72, h, "Сброс лута", 0xFFF87171, () -> {
 recordMode = 0;
 activeRunIndex = -1;
 finishedBannerTicks = 0;
@@ -418,7 +466,7 @@ recordedChestsCount = 0;
 MapStorage.data.farmRoute.clear();
 MapStorage.save();
 }));
-buttons.add(new UiBtn(width - 230, y, 80, h, "Очистить след", 0xFF94A3B8, () -> {
+topNavButtons.add(new NavButton(width - 230, y, 80, h, "Очистить след", 0xFF94A3B8, () -> {
 MapStorage.data.trail.clear();
 MapStorage.save();
 }));
@@ -428,7 +476,7 @@ public boolean mouseClicked(Click click, boolean doubled) {
 double mx = click.x();
 double my = click.y();
 if (click.button() == 0) {
-for (UiBtn btn : buttons) {
+for (NavButton btn : topNavButtons) {
 if (btn.contains(mx, my)) {
 btn.action.run();
 return true;
@@ -597,7 +645,7 @@ drawPlayerArrow(ctx, px, py, client.player.getYaw());
 }
 ctx.fill(0, 0, width, 36, 0xF212161F);
 ctx.fill(0, 35, width, 36, 0xFFD4AF37);
-for (UiBtn btn : buttons) {
+for (NavButton btn : topNavButtons) {
 boolean hover = btn.contains(mouseX, mouseY);
 ctx.fill(btn.x, btn.y, btn.x + btn.w, btn.y + btn.h, hover ? 0xFF262F40 : 0xFF1A202C);
 drawBorder(ctx, btn.x, btn.y, btn.w, btn.h, hover ? 0xFFFFD700 : 0x66D4AF37);
@@ -705,12 +753,24 @@ if (e2 <= dx) { err += dx; y0 += sy; }
 public static class AddMarkScreen extends Screen {
 private TextFieldWidget nameField;
 private final int targetX, targetY, targetZ;
-private record ModalBtn(int x, int y, int w, int h, String label, int color, Runnable action) {
-boolean contains(double mx, double my) {
+public static class DialogButton {
+public final int x, y, w, h, color;
+public final String label;
+public final Runnable action;
+public DialogButton(int x, int y, int w, int h, String label, int color, Runnable action) {
+this.x = x;
+this.y = y;
+this.w = w;
+this.h = h;
+this.label = label;
+this.color = color;
+this.action = action;
+}
+public boolean contains(double mx, double my) {
 return mx >= x && mx <= x + w && my >= y && my <= y + h;
 }
 }
-private final List modalButtons = new ArrayList<>();
+private final List dialogButtons = new ArrayList<>();
 public AddMarkScreen(int x, int y, int z) {
 super(Text.literal("Новая метка"));
 this.targetX = x;
@@ -725,15 +785,15 @@ nameField = new TextFieldWidget(textRenderer, cx - 105, cy - 22, 210, 20, Text.l
 nameField.setPlaceholder(Text.literal("Например: Сундук у бархана"));
 addDrawableChild(nameField);
 setInitialFocus(nameField);
-modalButtons.clear();
-modalButtons.add(new ModalBtn(cx - 105, cy + 8, 66, 22, "Сундук", 0xFFFACC15, () -> saveMark("CHEST")));
-modalButtons.add(new ModalBtn(cx - 33, cy + 8, 66, 22, "Ферма", 0xFF4ADE80, () -> saveMark("FARM")));
-modalButtons.add(new ModalBtn(cx + 39, cy + 8, 66, 22, "Точка", 0xFF22D3EE, () -> saveMark("POINT")));
+dialogButtons.clear();
+dialogButtons.add(new DialogButton(cx - 105, cy + 8, 66, 22, "Сундук", 0xFFFACC15, () -> saveMark("CHEST")));
+dialogButtons.add(new DialogButton(cx - 33, cy + 8, 66, 22, "Ферма", 0xFF4ADE80, () -> saveMark("FARM")));
+dialogButtons.add(new DialogButton(cx + 39, cy + 8, 66, 22, "Точка", 0xFF22D3EE, () -> saveMark("POINT")));
 }
 @Override
 public boolean mouseClicked(Click click, boolean doubled) {
 if (click.button() == 0) {
-for (ModalBtn btn : modalButtons) {
+for (DialogButton btn : dialogButtons) {
 if (btn.contains(click.x(), click.y())) {
 btn.action.run();
 return true;
@@ -766,7 +826,7 @@ ctx.fill(cx - 120, cy - 55, cx + 120, cy + 44, 0xF512161F);
 drawBorder(ctx, cx - 120, cy - 55, 240, 99, 0xFFD4AF37);
 super.render(ctx, mouseX, mouseY, delta);
 ctx.drawCenteredTextWithShadow(textRenderer, "★ Новая метка (" + targetX + ", " + targetZ + ")", cx, cy - 42, 0xFFFFD700);
-for (ModalBtn btn : modalButtons) {
+for (DialogButton btn : dialogButtons) {
 boolean hover = btn.contains(mouseX, mouseY);
 ctx.fill(btn.x, btn.y, btn.x + btn.w, btn.y + btn.h, hover ? 0xFF262F40 : 0xFF1A202C);
 drawBorder(ctx, btn.x, btn.y, btn.w, btn.h, hover ? btn.color : 0x66D4AF37);
