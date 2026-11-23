@@ -1,15 +1,12 @@
 package ru.workshop.routemap;
 
-import com.mojang.blaze3d.systems.RenderSystem;
 import net.fabricmc.api.ClientModInitializer;
 import net.fabricmc.fabric.api.client.event.lifecycle.v1.ClientTickEvents;
 import net.fabricmc.fabric.api.client.keybinding.v1.KeyBindingHelper;
-import net.fabricmc.fabric.api.client.rendering.v1.WorldRenderContext;
-import net.fabricmc.fabric.api.client.rendering.v1.WorldRenderEvents;
+import net.fabricmc.fabric.api.client.rendering.v1.HudRenderCallback;
 import net.minecraft.block.BlockState;
 import net.minecraft.block.MapColor;
 import net.minecraft.client.MinecraftClient;
-import net.minecraft.client.font.TextRenderer;
 import net.minecraft.client.gui.Click;
 import net.minecraft.client.gui.DrawContext;
 import net.minecraft.client.gui.screen.Screen;
@@ -19,15 +16,8 @@ import net.minecraft.client.gui.screen.ingame.InventoryScreen;
 import net.minecraft.client.gui.widget.ButtonWidget;
 import net.minecraft.client.gui.widget.TextFieldWidget;
 import net.minecraft.client.option.KeyBinding;
-import net.minecraft.client.render.BufferBuilder;
 import net.minecraft.client.render.Camera;
-import net.minecraft.client.render.GameRenderer;
-import net.minecraft.client.render.Tessellator;
-import net.minecraft.client.render.VertexFormat;
-import net.minecraft.client.render.VertexFormats;
-import net.minecraft.client.render.VertexConsumerProvider;
 import net.minecraft.client.util.InputUtil;
-import net.minecraft.client.util.math.MatrixStack;
 import net.minecraft.text.Text;
 import net.minecraft.util.hit.BlockHitResult;
 import net.minecraft.util.hit.HitResult;
@@ -35,7 +25,8 @@ import net.minecraft.util.math.BlockPos;
 import net.minecraft.util.math.Vec3d;
 import net.minecraft.world.Heightmap;
 import net.minecraft.world.World;
-import org.joml.Matrix4f;
+import org.joml.Quaternionf;
+import org.joml.Vector3f;
 import org.lwjgl.glfw.GLFW;
 
 import java.util.ArrayList;
@@ -69,8 +60,73 @@ public class RouteMapClient implements ClientModInitializer {
                 "key.routemap.mark", InputUtil.Type.KEYSYM, GLFW.GLFW_KEY_B, KeyBinding.Category.MISC
         ));
 
-        // 3D-подсветка текущего сундука в мире
-        WorldRenderEvents.LAST.register(this::renderActiveBeaconInWorld);
+        // Подсветка целевого сундука прямо в мире через проекцию камеры (работает сквозь стены и с любыми шейдерами)
+        HudRenderCallback.EVENT.register((ctx, renderTickCounter) -> {
+            MinecraftClient client = MinecraftClient.getInstance();
+            if (client.player == null || client.world == null || client.currentScreen != null) return;
+
+            MapStorage.Waypoint target = getCurrentRunTarget();
+            if (target == null) return;
+
+            Camera camera = client.gameRenderer.getCamera();
+            Vec3d camPos = camera.getPos();
+
+            double dx = (target.x + 0.5) - camPos.x;
+            double dy = (target.y + 0.5) - camPos.y;
+            double dz = (target.z + 0.5) - camPos.z;
+            double dist = Math.sqrt(dx * dx + dy * dy + dz * dz);
+
+            // Переводим мировые координаты сундука в пространство камеры
+            Vector3f rel = new Vector3f((float) dx, (float) dy, (float) dz);
+            Quaternionf invRot = new Quaternionf(camera.getRotation()).conjugate();
+            invRot.transform(rel);
+
+            int sw = client.getWindow().getScaledWidth();
+            int sh = client.getWindow().getScaledHeight();
+
+            // В системе координат камеры Minecraft взгляд направлен вдоль -Z
+            if (rel.z < -0.1f) {
+                double fov = Math.toRadians(client.options.getFov().getValue());
+                double scale = (sh / 2.0) / Math.tan(fov / 2.0);
+
+                int sx = (int) (sw / 2.0 + (rel.x / -rel.z) * scale);
+                int sy = (int) (sh / 2.0 - (rel.y / -rel.z) * scale);
+
+                // Ограничиваем, чтобы маркер не улетал за края экрана
+                sx = Math.max(24, Math.min(sw - 24, sx));
+                sy = Math.max(24, Math.min(sh - 24, sy));
+
+                // Размер светящейся рамки зависит от расстояния до сундука
+                int box = (int) Math.max(6, Math.min(28, 140.0 / Math.max(3.0, dist)));
+
+                // Вертикальный золотой луч над сундуком
+                ctx.fill(sx - 1, Math.max(10, sy - box - 45), sx + 1, sy - box, 0x88FFD700);
+
+                // Светящаяся золотая рамка вокруг сундука
+                ctx.fill(sx - box - 1, sy - box - 1, sx + box + 1, sy + box + 1, 0x33FFD700);
+                ctx.fill(sx - box, sy - box, sx + box, sy - box + 2, 0xFFFFD700);
+                ctx.fill(sx - box, sy + box - 2, sx + box, sy + box, 0xFFFFD700);
+                ctx.fill(sx - box, sy - box, sx - box + 2, sy + box, 0xFFFFD700);
+                ctx.fill(sx + box - 2, sy - box, sx + box, sy + box, 0xFFFFD700);
+
+                // Подпись с названием и дистанцией
+                String label = "★ " + target.name + " (" + (int) dist + " м)";
+                int tw = client.textRenderer.getWidth(label);
+                int lx = Math.max(6, Math.min(sw - tw - 6, sx - tw / 2));
+                int ly = Math.max(8, sy - box - 15);
+
+                ctx.fill(lx - 3, ly - 2, lx + tw + 3, ly + 10, 0xAA000000);
+                ctx.drawTextWithShadow(client.textRenderer, label, lx, ly, 0xFFFFD700);
+            } else {
+                // Если сундук строго за спиной — показываем компактную подсказку у нижнего края
+                String backLabel = "▼ " + target.name + " сзади (" + (int) dist + " м)";
+                int tw = client.textRenderer.getWidth(backLabel);
+                int lx = (sw - tw) / 2;
+                int ly = sh - 54;
+                ctx.fill(lx - 4, ly - 2, lx + tw + 4, ly + 10, 0xAA000000);
+                ctx.drawTextWithShadow(client.textRenderer, backLabel, lx, ly, 0xFFFFD700);
+            }
+        });
 
         ClientTickEvents.END_CLIENT_TICK.register(client -> {
             if (client.player == null || client.world == null) return;
@@ -124,93 +180,6 @@ public class RouteMapClient implements ClientModInitializer {
         return chests.get(activeRunIndex);
     }
 
-    // Отрисовка светящейся 3D-рамки и текста над целевым сундуком в мире
-    private void renderActiveBeaconInWorld(WorldRenderContext context) {
-        MinecraftClient client = MinecraftClient.getInstance();
-        if (client.player == null) return;
-
-        MapStorage.Waypoint target = getCurrentRunTarget();
-        if (target == null) return;
-
-        Camera camera = context.camera();
-        Vec3d camPos = camera.getPos();
-        MatrixStack matrices = context.matrixStack();
-        if (matrices == null) return;
-
-        double bx = target.x - camPos.x;
-        double by = target.y - camPos.y;
-        double bz = target.z - camPos.z;
-
-        // 1. Светящаяся золотая коробка вокруг сундука (видна сквозь блоки)
-        matrices.push();
-        RenderSystem.enableBlend();
-        RenderSystem.defaultBlendFunc();
-        RenderSystem.disableDepthTest();
-        RenderSystem.disableCull();
-        RenderSystem.setShader(GameRenderer::getPositionColorProgram);
-
-        Matrix4f mat = matrices.peek().getPositionMatrix();
-        Tessellator tessellator = Tessellator.getInstance();
-        BufferBuilder buf = tessellator.begin(VertexFormat.DrawMode.DEBUG_LINES, VertexFormats.POSITION_COLOR);
-
-        float x1 = (float) bx - 0.05f, y1 = (float) by - 0.05f, z1 = (float) bz - 0.05f;
-        float x2 = (float) bx + 1.05f, y2 = (float) by + 1.05f, z2 = (float) bz + 1.05f;
-        float r = 1.0f, g = 0.84f, b = 0.0f, a = 0.95f;
-
-        // Нижний квадрат
-        line(buf, mat, x1, y1, z1, x2, y1, z1, r, g, b, a);
-        line(buf, mat, x2, y1, z1, x2, y1, z2, r, g, b, a);
-        line(buf, mat, x2, y1, z2, x1, y1, z2, r, g, b, a);
-        line(buf, mat, x1, y1, z2, x1, y1, z1, r, g, b, a);
-        // Верхний квадрат
-        line(buf, mat, x1, y2, z1, x2, y2, z1, r, g, b, a);
-        line(buf, mat, x2, y2, z1, x2, y2, z2, r, g, b, a);
-        line(buf, mat, x2, y2, z2, x1, y2, z2, r, g, b, a);
-        line(buf, mat, x1, y2, z2, x1, y2, z1, r, g, b, a);
-        // Вертикальные рёбра + высокий луч вверх на 12 блоков
-        line(buf, mat, x1, y1, z1, x1, y2, z1, r, g, b, a);
-        line(buf, mat, x2, y1, z1, x2, y2, z1, r, g, b, a);
-        line(buf, mat, x2, y1, z2, x2, y2, z2, r, g, b, a);
-        line(buf, mat, x1, y1, z2, x1, y2, z2, r, g, b, a);
-        line(buf, mat, (float) bx + 0.5f, y2, (float) bz + 0.5f, (float) bx + 0.5f, y2 + 12.0f, (float) bz + 0.5f, 1.0f, 0.92f, 0.2f, 0.6f);
-
-        var built = buf.endNullable();
-        if (built != null) {
-            com.mojang.blaze3d.systems.BufferRenderer.drawWithGlobalProgram(built);
-        }
-
-        // 2. Парящая подпись с названием и расстоянием (масштабируется, чтобы читаться издалека)
-        double dist = Math.sqrt(
-                Math.pow(target.x + 0.5 - client.player.getX(), 2) +
-                Math.pow(target.y + 0.5 - client.player.getY(), 2) +
-                Math.pow(target.z + 0.5 - client.player.getZ(), 2)
-        );
-        String label = "★ " + target.name + " (" + (int) dist + " м)";
-
-        matrices.push();
-        matrices.translate(bx + 0.5, by + 1.6, bz + 0.5);
-        matrices.multiply(camera.getRotation());
-        float scale = (float) Math.max(0.025, dist * 0.0045);
-        matrices.scale(scale, -scale, scale);
-
-        TextRenderer tr = client.textRenderer;
-        int tw = tr.getWidth(label);
-        VertexConsumerProvider.Immediate immediate = client.getBufferBuilders().getEntityVertexConsumers();
-        tr.draw(label, -tw / 2.0f, 0, 0xFFFFD700, true, matrices.peek().getPositionMatrix(), immediate, TextRenderer.TextLayerType.SEE_THROUGH, 0x99000000, 15728880);
-        immediate.draw();
-        matrices.pop();
-
-        RenderSystem.enableDepthTest();
-        RenderSystem.enableCull();
-        RenderSystem.disableBlend();
-        matrices.pop();
-    }
-
-    private void line(BufferBuilder buf, Matrix4f mat, float x1, float y1, float z1, float x2, float y2, float z2, float r, float g, float b, float a) {
-        buf.vertex(mat, x1, y1, z1).color(r, g, b, a);
-        buf.vertex(mat, x2, y2, z2).color(r, g, b, a);
-    }
-
     private void checkOpenedContainer(MinecraftClient client) {
         if (client.player == null) {
             lastHandledScreen = null;
@@ -227,28 +196,29 @@ public class RouteMapClient implements ClientModInitializer {
                     targetPos = ((BlockHitResult) client.crosshairTarget).getBlockPos();
                 }
 
-                // А. Если запущено ПРОХОЖДЕНИЕ маршрута — проверяем, открыл ли игрок нужный сундук
+                // А. Если запущено ПРОХОЖДЕНИЕ маршрута — переключаем на следующий сундук
                 MapStorage.Waypoint runTarget = getCurrentRunTarget();
                 if (runTarget != null) {
-double d = Math.hypot(client.player.getX() - (runTarget.x + 0.5), client.player.getZ() - (runTarget.z + 0.5));
-double dBlock = Math.hypot(targetPos.getX() - runTarget.x, targetPos.getZ() - runTarget.z);
-if (d <= 6.5 || dBlock <= 4.0) {
-List<MapStorage.Waypoint> chests = getChestMarks();
-activeRunIndex++;
-if (activeRunIndex >= chests.size()) {
-activeRunIndex = 0; // Зацикливаем на 1-й сундук для нового круга фарма!
-client.player.sendMessage(Text.literal("§6[RouteMap] §aКруг завершён! Подсвечен снова §e" + chests.get(0).name), true);
-} else {
-client.player.sendMessage(Text.literal("§6[RouteMap] §aГотово! Следующая цель: §e" + chests.get(activeRunIndex).name), true);
-}
-}
-}
-// Б. Если включена ЗАПИСЬ нового маршрута
-if (recordMode != 0) {
-if (recordMode == 1) {
-recordMode = 2;
-recordedChestsCount = 0;
-MapStorage.data.farmRoute.clear();
+                    double d = Math.hypot(client.player.getX() - (runTarget.x + 0.5), client.player.getZ() - (runTarget.z + 0.5));
+                    double dBlock = Math.hypot(targetPos.getX() - runTarget.x, targetPos.getZ() - runTarget.z);
+                    if (d <= 6.5 || dBlock <= 4.0) {
+                        List<MapStorage.Waypoint> chests = getChestMarks();
+                        activeRunIndex++;
+                        if (activeRunIndex >= chests.size()) {
+                            activeRunIndex = 0;
+                            client.player.sendMessage(Text.literal("§6[RouteMap] §aКруг завершён! Подсвечен снова §e" + chests.get(0).name), true);
+                        } else {
+                            client.player.sendMessage(Text.literal("§6[RouteMap] §aГотово! Следующая цель: §e" + chests.get(activeRunIndex).name), true);
+                        }
+                    }
+                }
+
+                // Б. Если включена ЗАПИСЬ нового маршрута
+                if (recordMode != 0) {
+                    if (recordMode == 1) {
+                        recordMode = 2;
+                        recordedChestsCount = 0;
+                        MapStorage.data.farmRoute.clear();
 MapStorage.data.farmRoute.add(new MapStorage.RoutePoint(targetPos.getX(), targetPos.getZ()));
 }
 boolean alreadyMarked = false;
@@ -376,7 +346,6 @@ client.setScreen(new AddMarkScreen(
 ));
 }
 }).dimensions(78, 10, 54, 20).build());
-// Кнопка записи маршрута
 addDrawableChild(ButtonWidget.builder(Text.literal(getRecordButtonText()), b -> {
 if (recordMode == 0) {
 recordMode = 1;
@@ -387,7 +356,6 @@ MapStorage.save();
 }
 b.setMessage(Text.literal(getRecordButtonText()));
 }).dimensions(136, 10, 96, 20).build());
-// Кнопка ЗАПУСКА маршрута с 3D-подсветкой в мире
 addDrawableChild(ButtonWidget.builder(Text.literal(getRunButtonText()), b -> {
 if (activeRunIndex < 0) {
 List<MapStorage.Waypoint> chests = getChestMarks();
@@ -429,7 +397,6 @@ int sy = (int) (midY + (wp.z - centerZ) * zoom);
 if (Math.hypot(mx - sx, my - sy) <= 8) {
 if (click.button() == 0) {
 selectedMark = (selectedMark == wp) ? null : wp;
-// Если кликнули ЛКМ по сундуку во время запущенного маршрута — переключаем подсветку на него
 if ("CHEST".equals(wp.type) && activeRunIndex >= 0) {
 List<MapStorage.Waypoint> chests = getChestMarks();
 int idx = chests.indexOf(wp);
@@ -471,7 +438,6 @@ super.render(ctx, mouseX, mouseY, delta);
 if (client == null || client.player == null) return;
 int midX = width / 2;
 int midY = height / 2;
-// Рельеф местности
 int minGX = (int) Math.floor((centerX - midX / zoom) / 2.0) - 1;
 int maxGX = (int) Math.ceil((centerX + midX / zoom) / 2.0) + 1;
 int minGZ = (int) Math.floor((centerZ - (midY - 36) / zoom) / 2.0) - 1;
