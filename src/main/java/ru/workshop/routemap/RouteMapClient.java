@@ -227,3 +227,36 @@ public class RouteMapClient implements ClientModInitializer {
             addDrawableChild(ButtonWidget.builder(Text.literal("Сундук"), b -> saveMark("CHEST"))
                     .dimensions(cx - 100, cy - 5, 64, 20).build());
             addDrawableChild(ButtonWidget.builder(Text.literal("Ферма"), b -> saveMark("FARM"))
+.dimensions(cx - 32, cy - 5, 64, 20).build());
+addDrawableChild(ButtonWidget.builder(Text.literal("Точка"), b -> saveMark("POINT"))
+.dimensions(cx + 36, cy - 5, 64, 20).build());
+}
+private void saveMark(String type) {
+if (client != null && client.player != null && client.world != null) {
+String title = nameField.getText().trim();
+if (title.isEmpty()) {
+title = switch (type) {
+case "CHEST" -> "Сундук";
+case "FARM" -> "Ферма";
+default -> "Точка";
+};
+}
+String dim = client.world.getRegistryKey().getValue().toString();
+MapStorage.getWorld(dim).marks.add(new MapStorage.Waypoint(
+title, type,
+(int) Math.floor(client.player.getX()),
+(int) Math.floor(client.player.getY()),
+(int) Math.floor(client.player.getZ())
+));
+MapStorage.save();
+client.setScreen(new FullMapScreen());
+}
+}
+@Override
+public void render(DrawContext ctx, int mouseX, int mouseY, float delta) {
+ctx.fill(0, 0, width, height, 0xAA000000);
+super.render(ctx, mouseX, mouseY, delta);
+ctx.drawCenteredTextWithShadow(textRenderer, "Поставить метку на текущих координатах", width / 2, height / 2 - 55, 0xFFFFFFFF);
+}
+}
+}
