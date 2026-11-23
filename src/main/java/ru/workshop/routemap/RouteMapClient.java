@@ -67,7 +67,6 @@ public class RouteMapClient implements ClientModInitializer {
                 "key.routemap.mark", InputUtil.Type.KEYSYM, GLFW.GLFW_KEY_B, KeyBinding.Category.MISC
         ));
 
-        // HUD-рендер: плавная анимация подсветки сундука + стильный бейдж статуса
         HudRenderCallback.EVENT.register((ctx, renderTickCounter) -> {
             MinecraftClient client = MinecraftClient.getInstance();
             if (client.player == null || client.world == null || client.currentScreen != null) return;
@@ -127,7 +126,6 @@ public class RouteMapClient implements ClientModInitializer {
                 rawSx = Math.max(24f, Math.min(sw - 24f, rawSx));
                 rawSy = Math.max(24f, Math.min(sh - 24f, rawSy));
 
-                // Плавное масштабирование без резких скачков при приближении
                 float pulse = (float) Math.sin((System.currentTimeMillis() % 1600L) / 1600.0 * Math.PI * 2.0) * 1.5f;
                 float rawBox = (float) MathHelper.clamp(120.0 / (dist + 4.5), 6.0, 22.0) + pulse;
 
@@ -146,33 +144,25 @@ public class RouteMapClient implements ClientModInitializer {
                 int sy = Math.round(smoothSy);
                 int box = Math.round(smoothBox);
 
-                // Плавное затухание при приближении вплотную (< 3.5 м), чтобы не перекрывать сам сундук
                 float alphaFactor = (float) MathHelper.clamp((dist - 1.2) / 2.5, 0.25, 1.0);
                 int mainAlpha = ((int) (255 * alphaFactor)) << 24;
                 int softAlpha = ((int) (90 * alphaFactor)) << 24;
                 int goldMain = mainAlpha | 0xFFD700;
                 int goldSoft = softAlpha | 0xFFD700;
 
-                // Мягкий вертикальный луч над сундуком
                 int beamH = (int) MathHelper.clamp(dist * 1.2, 12, 42);
                 ctx.fill(sx - 1, Math.max(10, sy - box - beamH), sx + 1, sy - box, goldSoft);
 
-                // Аккуратные светящиеся уголки прицела вместо грубого сплошного квадрата
                 int corner = Math.max(3, box / 2);
-                // Верх-лево
                 ctx.fill(sx - box, sy - box, sx - box + corner, sy - box + 2, goldMain);
                 ctx.fill(sx - box, sy - box, sx - box + 2, sy - box + corner, goldMain);
-                // Верх-право
                 ctx.fill(sx + box - corner, sy - box, sx + box, sy - box + 2, goldMain);
                 ctx.fill(sx + box - 2, sy - box, sx + box, sy - box + corner, goldMain);
-                // Низ-лево
                 ctx.fill(sx - box, sy + box - 2, sx - box + corner, sy + box, goldMain);
                 ctx.fill(sx - box, sy + box - corner, sx - box + 2, sy + box, goldMain);
-                // Низ-право
                 ctx.fill(sx + box - corner, sy + box - 2, sx + box, sy + box, goldMain);
                 ctx.fill(sx + box - 2, sy + box - corner, sx + box, sy + box, goldMain);
 
-                // Плашка с названием и дистанцией
                 String label = "★ " + target.name + " • " + (int) dist + " м";
                 int tw = client.textRenderer.getWidth(label);
                 int lx = Math.max(6, Math.min(sw - tw - 6, sx - tw / 2));
@@ -201,21 +191,23 @@ public class RouteMapClient implements ClientModInitializer {
                 finishedBannerTicks--;
             }
 
-while (openMapKey.wasPressed()) {
-client.setScreen(new FullMapScreen());
-}
-while (addMarkKey.wasPressed()) {
-client.setScreen(new AddMarkScreen(
-(int) Math.floor(client.player.getX()),
-(int) Math.floor(client.player.getY()),
-(int) Math.floor(client.player.getZ())
-));
-}
-checkOpenedContainer(client);
-tickCounter++;
-if (tickCounter >= 10) {
-tickCounter = 0;
-recordStep(client);
+            while (openMapKey.wasPressed()) {
+                client.setScreen(new FullMapScreen());
+            }
+            while (addMarkKey.wasPressed()) {
+                client.setScreen(new AddMarkScreen(
+                        (int) Math.floor(client.player.getX()),
+                        (int) Math.floor(client.player.getY()),
+                        (int) Math.floor(client.player.getZ())
+                ));
+            }
+
+            checkOpenedContainer(client);
+
+            tickCounter++;
+            if (tickCounter >= 10) {
+                tickCounter = 0;
+                recordStep(client);
 scanTerrain(client);
 }
 terrainSaveCounter++;
@@ -256,7 +248,7 @@ lastHandledScreen = null;
 return;
 }
 Screen current = client.currentScreen;
-if (current instanceof HandledScreen<?> && !(current instanceof InventoryScreen) && !(current instanceof CreativeInventoryScreen)) {
+if (current instanceof HandledScreen && !(current instanceof InventoryScreen) && !(current instanceof CreativeInventoryScreen)) {
 if (current != lastHandledScreen) {
 lastHandledScreen = current;
 BlockPos targetPos = client.player.getBlockPos();
@@ -395,7 +387,7 @@ public boolean contains(double mx, double my) {
 return mx >= x && mx <= x + w && my >= y && my <= y + h;
 }
 }
-private final List topNavButtons = new ArrayList<>();
+private NavButton[] topNavButtons = new NavButton[0];
 public FullMapScreen() {
 super(Text.literal("Картограф Мастерской"));
 }
@@ -407,18 +399,27 @@ centerZ = client.player.getZ();
 }
 }
 private void rebuildButtons() {
-topNavButtons.clear();
 int y = 8;
 int h = 20;
-topNavButtons.add(new NavButton(10, y, 22, h, "+", 0xFF38BDF8, () -> zoom = Math.min(8.0, zoom * 1.4)));
-topNavButtons.add(new NavButton(35, y, 22, h, "-", 0xFF38BDF8, () -> zoom = Math.max(0.25, zoom / 1.4)));
-topNavButtons.add(new NavButton(60, y, 22, h, "Я", 0xFFEF4444, () -> {
+String recLabel = switch (recordMode) {
+case 1 -> "Жду 1-й сундук...";
+case 2 -> "● Запись (" + recordedChestsCount + ")";
+default -> "Записать лут";
+};
+int recColor = (recordMode == 2) ? 0xFF4ADE80 : (recordMode == 1 ? 0xFFFACC15 : 0xFFE2E8F0);
+MapStorage.Waypoint target = getCurrentRunTarget();
+String runLabel = (target == null) ? "Запустить маршрут" : "★ " + target.name;
+int runColor = (target != null) ? 0xFFFFD700 : 0xFFE2E8F0;
+topNavButtons = new NavButton[] {
+new NavButton(10, y, 22, h, "+", 0xFF38BDF8, () -> zoom = Math.min(8.0, zoom * 1.4)),
+new NavButton(35, y, 22, h, "-", 0xFF38BDF8, () -> zoom = Math.max(0.25, zoom / 1.4)),
+new NavButton(60, y, 22, h, "Я", 0xFFEF4444, () -> {
 if (client != null && client.player != null) {
 centerX = client.player.getX();
 centerZ = client.player.getZ();
 }
-}));
-topNavButtons.add(new NavButton(88, y, 60, h, "+ Метка", 0xFF22D3EE, () -> {
+}),
+new NavButton(88, y, 60, h, "+ Метка", 0xFF22D3EE, () -> {
 if (client != null && client.player != null) {
 client.setScreen(new AddMarkScreen(
 (int) Math.floor(client.player.getX()),
@@ -426,14 +427,8 @@ client.setScreen(new AddMarkScreen(
 (int) Math.floor(client.player.getZ())
 ));
 }
-}));
-String recLabel = switch (recordMode) {
-case 1 -> "Жду 1-й сундук...";
-case 2 -> "● Запись (" + recordedChestsCount + ")";
-default -> "Записать лут";
-};
-int recColor = (recordMode == 2) ? 0xFF4ADE80 : (recordMode == 1 ? 0xFFFACC15 : 0xFFE2E8F0);
-topNavButtons.add(new NavButton(154, y, 102, h, recLabel, recColor, () -> {
+}),
+new NavButton(154, y, 102, h, recLabel, recColor, () -> {
 if (recordMode == 0) {
 recordMode = 1;
 activeRunIndex = -1;
@@ -442,11 +437,8 @@ finishedBannerTicks = 0;
 recordMode = 0;
 MapStorage.save();
 }
-}));
-MapStorage.Waypoint target = getCurrentRunTarget();
-String runLabel = (target == null) ? "Запустить маршрут" : "★ " + target.name;
-int runColor = (target != null) ? 0xFFFFD700 : 0xFFE2E8F0;
-topNavButtons.add(new NavButton(262, y, 118, h, runLabel, runColor, () -> {
+}),
+new NavButton(262, y, 118, h, runLabel, runColor, () -> {
 if (activeRunIndex < 0) {
 if (!getChestMarks().isEmpty()) {
 recordMode = 0;
@@ -456,20 +448,21 @@ finishedBannerTicks = 0;
 } else {
 activeRunIndex = -1;
 }
-}));
-topNavButtons.add(new NavButton(width - 66, y, 56, h, showSidebar ? "Список ▸" : "Список ◂", 0xFFD4AF37, () -> showSidebar = !showSidebar));
-topNavButtons.add(new NavButton(width - 144, y, 72, h, "Сброс лута", 0xFFF87171, () -> {
+}),
+new NavButton(width - 66, y, 56, h, showSidebar ? "Список ▸" : "Список ◂", 0xFFD4AF37, () -> showSidebar = !showSidebar),
+new NavButton(width - 144, y, 72, h, "Сброс лута", 0xFFF87171, () -> {
 recordMode = 0;
 activeRunIndex = -1;
 finishedBannerTicks = 0;
 recordedChestsCount = 0;
 MapStorage.data.farmRoute.clear();
 MapStorage.save();
-}));
-topNavButtons.add(new NavButton(width - 230, y, 80, h, "Очистить след", 0xFF94A3B8, () -> {
+}),
+new NavButton(width - 230, y, 80, h, "Очистить след", 0xFF94A3B8, () -> {
 MapStorage.data.trail.clear();
 MapStorage.save();
-}));
+})
+};
 }
 @Override
 public boolean mouseClicked(Click click, boolean doubled) {
@@ -770,7 +763,7 @@ public boolean contains(double mx, double my) {
 return mx >= x && mx <= x + w && my >= y && my <= y + h;
 }
 }
-private final List dialogButtons = new ArrayList<>();
+private DialogButton[] dialogButtons = new DialogButton[0];
 public AddMarkScreen(int x, int y, int z) {
 super(Text.literal("Новая метка"));
 this.targetX = x;
@@ -785,10 +778,11 @@ nameField = new TextFieldWidget(textRenderer, cx - 105, cy - 22, 210, 20, Text.l
 nameField.setPlaceholder(Text.literal("Например: Сундук у бархана"));
 addDrawableChild(nameField);
 setInitialFocus(nameField);
-dialogButtons.clear();
-dialogButtons.add(new DialogButton(cx - 105, cy + 8, 66, 22, "Сундук", 0xFFFACC15, () -> saveMark("CHEST")));
-dialogButtons.add(new DialogButton(cx - 33, cy + 8, 66, 22, "Ферма", 0xFF4ADE80, () -> saveMark("FARM")));
-dialogButtons.add(new DialogButton(cx + 39, cy + 8, 66, 22, "Точка", 0xFF22D3EE, () -> saveMark("POINT")));
+dialogButtons = new DialogButton[] {
+new DialogButton(cx - 105, cy + 8, 66, 22, "Сундук", 0xFFFACC15, () -> saveMark("CHEST")),
+new DialogButton(cx - 33, cy + 8, 66, 22, "Ферма", 0xFF4ADE80, () -> saveMark("FARM")),
+new DialogButton(cx + 39, cy + 8, 66, 22, "Точка", 0xFF22D3EE, () -> saveMark("POINT"))
+};
 }
 @Override
 public boolean mouseClicked(Click click, boolean doubled) {
