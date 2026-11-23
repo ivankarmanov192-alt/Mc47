@@ -55,7 +55,9 @@ public class RouteMapClient implements ClientModInitializer {
 
     private int tickCounter = 0;
     private int terrainSaveCounter = 0;
-    private boolean terrainDirty = false;
+    private static boolean terrainDirty = false;
+    private double lastScanX = Double.NaN;
+    private double lastScanZ = Double.NaN;
 
     public static int getThemeRgb() {
         int idx = Math.abs(MapStorage.data.config.themeIndex) % THEME_COLORS.length;
@@ -86,7 +88,6 @@ public class RouteMapClient implements ClientModInitializer {
             int themeRgb = getThemeRgb();
             int themeFull = 0xFF000000 | themeRgb;
 
-            // 1. Настраиваемая плашка статуса
             MapStorage.Waypoint target = getCurrentRunTarget();
             if (cfg.showBadge) {
                 String badge = null;
@@ -141,7 +142,6 @@ public class RouteMapClient implements ClientModInitializer {
                 float rawSx = (float) (sw / 2.0 + (rel.x / -rel.z) * scale);
                 float rawSy = (float) (sh / 2.0 - (rel.y / -rel.z) * scale);
 
-                // Безопасная зона отступов сверху (36px) и снизу (46px), чтобы не перекрывать серверный HUD
                 rawSx = Math.max(28f, Math.min(sw - 28f, rawSx));
                 rawSy = Math.max(36f, Math.min(sh - 46f, rawSy));
 
@@ -160,7 +160,6 @@ public class RouteMapClient implements ClientModInitializer {
                         smoothBox = MathHelper.lerp(0.20f, smoothBox, rawBox);
                     }
                 } else {
-                    // Мгновенная жёсткая привязка к сундуку без анимации и задержек
                     smoothSx = rawSx;
                     smoothSy = rawSy;
                     smoothBox = rawBox;
@@ -174,11 +173,9 @@ public class RouteMapClient implements ClientModInitializer {
                 int mainColor = 0xFF000000 | themeRgb;
                 int softColor = 0x66000000 | themeRgb;
 
-                // Короткий луч над сундуком (не уходит в верхнюю панель)
                 int beamH = (int) MathHelper.clamp(dist * 0.8, 8, 24);
                 ctx.fill(sx - 1, Math.max(32, sy - box - beamH), sx + 1, sy - box, softColor);
 
-                // Уголки прицела
                 int corner = Math.max(3, box / 2);
                 ctx.fill(sx - box, sy - box, sx - box + corner, sy - box + 2, mainColor);
                 ctx.fill(sx - box, sy - box, sx - box + 2, sy - box + corner, mainColor);
@@ -189,7 +186,6 @@ public class RouteMapClient implements ClientModInitializer {
                 ctx.fill(sx + box - corner, sy + box - 2, sx + box, sy + box, mainColor);
                 ctx.fill(sx + box - 2, sy + box - corner, sx + box, sy + box, mainColor);
 
-                // Подпись
                 String label = "★ " + target.name + " • " + (int) dist + " м";
                 int tw = client.textRenderer.getWidth(label);
                 int lx = Math.max(6, Math.min(sw - tw - 6, sx - tw / 2));
@@ -206,16 +202,18 @@ public class RouteMapClient implements ClientModInitializer {
                 int ly = MathHelper.clamp((int) (sh * cfg.backY - 6), 6, sh - 16);
 
                 ctx.fill(lx - 5, ly - 2, lx + tw + 5, ly + 10, 0xCC0D1117);
-drawBorder(ctx, lx - 5, ly - 2, tw + 10, 12, 0xAA000000 | themeRgb);
-ctx.drawTextWithShadow(client.textRenderer, backLabel, lx, ly, themeFull);
-}
-});
-ClientTickEvents.END_CLIENT_TICK.register(client -> {
+                drawBorder(ctx, lx - 5, ly - 2, tw + 10, 12, 0xAA000000 | themeRgb);
+                ctx.drawTextWithShadow(client.textRenderer, backLabel, lx, ly, themeFull);
+            }
+        });
+
+        ClientTickEvents.END_CLIENT_TICK.register(client -> {
 if (client.player == null || client.world == null) return;
 if (finishedBannerTicks > 0) {
 finishedBannerTicks--;
 }
 while (openMapKey.wasPressed()) {
+scanTerrain(client, 64); // Принудительно догружаем рельеф вокруг при открытии карты
 client.setScreen(new FullMapScreen());
 }
 while (addMarkKey.wasPressed()) {
@@ -229,14 +227,22 @@ while (settingsKey.wasPressed()) {
 client.setScreen(new HudSettingsScreen(null));
 }
 checkOpenedContainer(client);
+// Если произошёл телепорт на вилке (> 60 блоков), сбрасываем счётчик и сразу сканируем
+double px = client.player.getX();
+double pz = client.player.getZ();
+if (!Double.isNaN(lastScanX) && Math.hypot(px - lastScanX, pz - lastScanZ) > 60) {
+tickCounter = 10;
+}
+lastScanX = px;
+lastScanZ = pz;
 tickCounter++;
 if (tickCounter >= 10) {
 tickCounter = 0;
 recordStep(client);
-scanTerrain(client);
+scanTerrain(client, 56);
 }
 terrainSaveCounter++;
-if (terrainSaveCounter >= 200 && terrainDirty) {
+if (terrainSaveCounter >= 120 && terrainDirty) {
 terrainSaveCounter = 0;
 terrainDirty = false;
 MapStorage.saveTerrain();
@@ -333,21 +339,23 @@ client.player.sendMessage(Text.literal("§6[Мастерская] §aОтмеч�
 lastHandledScreen = null;
 }
 }
-private void scanTerrain(MinecraftClient client) {
+public static void scanTerrain(MinecraftClient client, int radius) {
 World world = client.world;
 if (world == null || client.player == null) return;
 int px = (int) Math.floor(client.player.getX());
 int pz = (int) Math.floor(client.player.getZ());
-int radius = 48;
 BlockPos.Mutable pos = new BlockPos.Mutable();
 for (int dx = -radius; dx <= radius; dx += 2) {
 for (int dz = -radius; dz <= radius; dz += 2) {
 int wx = (px + dx) & ~1;
 int wz = (pz + dz) & ~1;
+// Проверяем, что чанк реально прогружен сервером после телепорта!
+if (!world.isChunkLoaded(wx >> 4, wz >> 4)) continue;
 int topY = world.getTopY(Heightmap.Type.MOTION_BLOCKING_NO_LEAVES, wx, wz) - 1;
-if (topY < world.getBottomY()) continue;
+if (topY <= world.getBottomY()) continue;
 pos.set(wx, topY, wz);
 BlockState state = world.getBlockState(pos);
+if (state.isAir()) continue;
 MapColor mapColor = state.getMapColor(world, pos);
 if (mapColor == MapColor.CLEAR) continue;
 int rgb = mapColor.color & 0xFFFFFF;
@@ -392,7 +400,7 @@ MapStorage.save();
 // ================= ЭКРАН НАСТРОЕК ИНТЕРФЕЙСА (КЛАВИША N ИЛИ КНОПКА ⚙) =================
 public static class HudSettingsScreen extends Screen {
 private final Screen parent;
-private int draggingItem = 0; // 0 = нет, 1 = тащим верхний бейдж, 2 = тащим плашку "сзади"
+private int draggingItem = 0;
 public static class SetBtn {
 public final int x, y, w, h, color;
 public final String label;
@@ -410,7 +418,7 @@ public boolean contains(double mx, double my) {
 return mx >= x && mx <= x + w && my >= y && my <= y + h;
 }
 }
-private SetBtn[] setButtons = new SetBtn;
+private SetBtn[] setButtons = new SetBtn[0];
 public HudSettingsScreen(Screen parent) {
 super(Text.literal("Настройки интерфейса"));
 this.parent = parent;
@@ -462,7 +470,6 @@ btn.action.run();
 return true;
 }
 }
-// Проверяем захват перетаскиваемой плашки статуса
 String sampleBadge = "★ МАРШРУТ: Сундук #1 (45 м)";
 int bw = textRenderer.getWidth(sampleBadge) + 12;
 int bx = MathHelper.clamp((int) (width * cfg.badgeX - bw / 2.0f), 4, width - bw - 4);
@@ -471,7 +478,6 @@ if (mx >= bx && mx <= bx + bw && my >= by && my <= by + 14) {
 draggingItem = 1;
 return true;
 }
-// Проверяем захват перетаскиваемой плашки "сзади"
 String sampleBack = "▼ Сундук #1 сзади • 30 м";
 int backW = textRenderer.getWidth(sampleBack) + 10;
 int backX = MathHelper.clamp((int) (width * cfg.backX - backW / 2.0f), 6, width - backW - 6);
@@ -512,7 +518,6 @@ rebuildSetButtons();
 ctx.fill(0, 0, width, height, 0x9907090D);
 MapStorage.HudConfig cfg = MapStorage.data.config;
 int themeFull = 0xFF000000 | getThemeRgb();
-// Центральное окно настроек
 int cx = width / 2;
 int cy = height / 2;
 ctx.fill(cx - 130, cy - 68, cx + 130, cy + 80, 0xF512161F);
@@ -526,7 +531,6 @@ drawBorder(ctx, btn.x, btn.y, btn.w, btn.h, hover ? themeFull : 0x66FFFFFF);
 int tw = textRenderer.getWidth(btn.label);
 ctx.drawTextWithShadow(textRenderer, btn.label, btn.x + (btn.w - tw) / 2, btn.y + 7, btn.color);
 }
-// Превью плашки статуса (можно таскать мышкой!)
 String sampleBadge = "★ МАРШРУТ: Сундук #1 (45 м)";
 int bw = textRenderer.getWidth(sampleBadge) + 12;
 int bx = MathHelper.clamp((int) (width * cfg.badgeX - bw / 2.0f), 4, width - bw - 4);
@@ -534,7 +538,6 @@ int by = MathHelper.clamp((int) (height * cfg.badgeY - 7), 4, height - 18);
 ctx.fill(bx, by, bx + bw, by + 14, 0xEE12161F);
 drawBorder(ctx, bx, by, bw, 14, themeFull);
 ctx.drawTextWithShadow(textRenderer, sampleBadge, bx + 6, by + 3, themeFull);
-// Превью плашки "сзади" (тоже можно таскать мышкой!)
 String sampleBack = "▼ Сундук #1 сзади • 30 м";
 int backW = textRenderer.getWidth(sampleBack) + 10;
 int backX = MathHelper.clamp((int) (width * cfg.backX - backW / 2.0f), 6, width - backW - 6);
@@ -567,7 +570,7 @@ public boolean contains(double mx, double my) {
 return mx >= x && mx <= x + w && my >= y && my <= y + h;
 }
 }
-private NavButton[] topNavButtons = new NavButton;
+private NavButton[] topNavButtons = new NavButton[0];
 public FullMapScreen() {
 super(Text.literal("Картограф Мастерской"));
 }
@@ -576,6 +579,7 @@ protected void init() {
 if (client != null && client.player != null) {
 centerX = client.player.getX();
 centerZ = client.player.getZ();
+scanTerrain(client, 64);
 }
 }
 private void rebuildButtons() {
@@ -598,6 +602,7 @@ new NavButton(56, y, 20, h, "Я", 0xFFEF4444, () -> {
 if (client != null && client.player != null) {
 centerX = client.player.getX();
 centerZ = client.player.getZ();
+scanTerrain(client, 64);
 }
 }),
 new NavButton(80, y, 56, h, "+ Метка", 0xFF22D3EE, () -> {
@@ -949,7 +954,7 @@ public boolean contains(double mx, double my) {
 return mx >= x && mx <= x + w && my >= y && my <= y + h;
 }
 }
-private DialogButton[] dialogButtons = new DialogButton;
+private DialogButton[] dialogButtons = new DialogButton[0];
 public AddMarkScreen(int x, int y, int z) {
 super(Text.literal("Новая метка"));
 this.targetX = x;
@@ -967,20 +972,22 @@ setInitialFocus(nameField);
 dialogButtons = new DialogButton[] {
 new DialogButton(cx - 105, cy + 8, 66, 22, "Сундук", 0xFFFACC15, () -> saveMark("CHEST")),
 new DialogButton(cx - 33, cy + 8, 66, 22, "Ферма", 0xFF4ADE80, () -> saveMark("FARM")),
-new DialogButton(cx
-• 39, cy + 8, 66, 22, "Точка", 0xFF22D3EE, () -> saveMark("POINT"))
+new DialogButton(cx + 39, cy + 8, 66, 22, "Точка", 0xFF22D3EE, () -> saveMark("POINT"))
 };
-}@Override
+}
+@Override
 public boolean mouseClicked(Click click, boolean doubled) {
 if (click.button() == 0) {
 for (DialogButton btn : dialogButtons) {
-if (btn.contains(click.x(), click.y())) {btn.action.run();
+if (btn.contains(click.x(), click.y())) {
+btn.action.run();
 return true;
 }
 }
 }
 return super.mouseClicked(click, doubled);
-}private void saveMark(String type) {
+}
+private void saveMark(String type) {
 String title = nameField.getText().trim();
 if (title.isEmpty()) {
 title = switch (type) {
@@ -991,15 +998,21 @@ default -> "Точка";
 }
 MapStorage.Waypoint wp = new MapStorage.Waypoint(title, type, targetX, targetY, targetZ);
 MapStorage.data.marks.add(wp);
-selectedMark = wp;MapStorage.save();
+selectedMark = wp;
+MapStorage.save();
 if (client != null) client.setScreen(new FullMapScreen());
-}@Override
+}
+@Override
 public void render(DrawContext ctx, int mouseX, int mouseY, float delta) {
 ctx.fill(0, 0, width, height, 0xBB07090D);
-int themeFull = 0xFF000000 | getThemeRgb();int cx = width / 2;
+int themeFull = 0xFF000000 | getThemeRgb();
+int cx = width / 2;
 int cy = height / 2;
 ctx.fill(cx - 120, cy - 55, cx + 120, cy + 44, 0xF512161F);
-drawBorder(ctx, cx - 120, cy - 55, 240, 99, themeFull);super.render(ctx, mouseX, mouseY, delta);ctx.drawCenteredTextWithShadow(textRenderer, "★ Новая метка (" + targetX + ", " + targetZ + ")", cx, cy - 42, themeFull);for (DialogButton btn : dialogButtons) {
+drawBorder(ctx, cx - 120, cy - 55, 240, 99, themeFull);
+super.render(ctx, mouseX, mouseY, delta);
+ctx.drawCenteredTextWithShadow(textRenderer, "★ Новая метка (" + targetX + ", " + targetZ + ")", cx, cy - 42, themeFull);
+for (DialogButton btn : dialogButtons) {
 boolean hover = btn.contains(mouseX, mouseY);
 ctx.fill(btn.x, btn.y, btn.x + btn.w, btn.y + btn.h, hover ? 0xFF262F40 : 0xFF1A202C);
 drawBorder(ctx, btn.x, btn.y, btn.w, btn.h, hover ? btn.color : (0x66000000 | getThemeRgb()));
