@@ -1,11 +1,15 @@
 package ru.workshop.routemap;
 
+import com.mojang.blaze3d.systems.RenderSystem;
 import net.fabricmc.api.ClientModInitializer;
 import net.fabricmc.fabric.api.client.event.lifecycle.v1.ClientTickEvents;
 import net.fabricmc.fabric.api.client.keybinding.v1.KeyBindingHelper;
+import net.fabricmc.fabric.api.client.rendering.v1.WorldRenderContext;
+import net.fabricmc.fabric.api.client.rendering.v1.WorldRenderEvents;
 import net.minecraft.block.BlockState;
 import net.minecraft.block.MapColor;
 import net.minecraft.client.MinecraftClient;
+import net.minecraft.client.font.TextRenderer;
 import net.minecraft.client.gui.Click;
 import net.minecraft.client.gui.DrawContext;
 import net.minecraft.client.gui.screen.Screen;
@@ -15,15 +19,26 @@ import net.minecraft.client.gui.screen.ingame.InventoryScreen;
 import net.minecraft.client.gui.widget.ButtonWidget;
 import net.minecraft.client.gui.widget.TextFieldWidget;
 import net.minecraft.client.option.KeyBinding;
+import net.minecraft.client.render.BufferBuilder;
+import net.minecraft.client.render.Camera;
+import net.minecraft.client.render.GameRenderer;
+import net.minecraft.client.render.Tessellator;
+import net.minecraft.client.render.VertexFormat;
+import net.minecraft.client.render.VertexFormats;
+import net.minecraft.client.render.VertexConsumerProvider;
 import net.minecraft.client.util.InputUtil;
+import net.minecraft.client.util.math.MatrixStack;
 import net.minecraft.text.Text;
 import net.minecraft.util.hit.BlockHitResult;
 import net.minecraft.util.hit.HitResult;
 import net.minecraft.util.math.BlockPos;
+import net.minecraft.util.math.Vec3d;
 import net.minecraft.world.Heightmap;
 import net.minecraft.world.World;
+import org.joml.Matrix4f;
 import org.lwjgl.glfw.GLFW;
 
+import java.util.ArrayList;
 import java.util.List;
 
 public class RouteMapClient implements ClientModInitializer {
@@ -35,6 +50,9 @@ public class RouteMapClient implements ClientModInitializer {
     private static int recordMode = 0;
     private static int recordedChestsCount = 0;
     private static Screen lastHandledScreen = null;
+
+    // Режим прохождения записанного маршрута (-1 = выключен, 0+ = индекс текущего сундука)
+    private static int activeRunIndex = -1;
 
     private int tickCounter = 0;
     private int terrainSaveCounter = 0;
@@ -51,6 +69,9 @@ public class RouteMapClient implements ClientModInitializer {
                 "key.routemap.mark", InputUtil.Type.KEYSYM, GLFW.GLFW_KEY_B, KeyBinding.Category.MISC
         ));
 
+        // 3D-подсветка текущего сундука в мире
+        WorldRenderEvents.LAST.register(this::renderActiveBeaconInWorld);
+
         ClientTickEvents.END_CLIENT_TICK.register(client -> {
             if (client.player == null || client.world == null) return;
 
@@ -65,7 +86,6 @@ public class RouteMapClient implements ClientModInitializer {
                 ));
             }
 
-            // Отслеживаем открытие любого серверного окна лута/сундука
             checkOpenedContainer(client);
 
             tickCounter++;
@@ -84,191 +104,313 @@ public class RouteMapClient implements ClientModInitializer {
         });
     }
 
+    private static List<MapStorage.Waypoint> getChestMarks() {
+        List<MapStorage.Waypoint> chests = new ArrayList<>();
+        for (MapStorage.Waypoint wp : MapStorage.data.marks) {
+            if ("CHEST".equals(wp.type)) {
+                chests.add(wp);
+            }
+        }
+        return chests;
+    }
+
+    private static MapStorage.Waypoint getCurrentRunTarget() {
+        if (activeRunIndex < 0) return null;
+        List<MapStorage.Waypoint> chests = getChestMarks();
+        if (chests.isEmpty() || activeRunIndex >= chests.size()) {
+            activeRunIndex = -1;
+            return null;
+        }
+        return chests.get(activeRunIndex);
+    }
+
+    // Отрисовка светящейся 3D-рамки и текста над целевым сундуком в мире
+    private void renderActiveBeaconInWorld(WorldRenderContext context) {
+        MinecraftClient client = MinecraftClient.getInstance();
+        if (client.player == null) return;
+
+        MapStorage.Waypoint target = getCurrentRunTarget();
+        if (target == null) return;
+
+        Camera camera = context.camera();
+        Vec3d camPos = camera.getPos();
+        MatrixStack matrices = context.matrixStack();
+        if (matrices == null) return;
+
+        double bx = target.x - camPos.x;
+        double by = target.y - camPos.y;
+        double bz = target.z - camPos.z;
+
+        // 1. Светящаяся золотая коробка вокруг сундука (видна сквозь блоки)
+        matrices.push();
+        RenderSystem.enableBlend();
+        RenderSystem.defaultBlendFunc();
+        RenderSystem.disableDepthTest();
+        RenderSystem.disableCull();
+        RenderSystem.setShader(GameRenderer::getPositionColorProgram);
+
+        Matrix4f mat = matrices.peek().getPositionMatrix();
+        Tessellator tessellator = Tessellator.getInstance();
+        BufferBuilder buf = tessellator.begin(VertexFormat.DrawMode.DEBUG_LINES, VertexFormats.POSITION_COLOR);
+
+        float x1 = (float) bx - 0.05f, y1 = (float) by - 0.05f, z1 = (float) bz - 0.05f;
+        float x2 = (float) bx + 1.05f, y2 = (float) by + 1.05f, z2 = (float) bz + 1.05f;
+        float r = 1.0f, g = 0.84f, b = 0.0f, a = 0.95f;
+
+        // Нижний квадрат
+        line(buf, mat, x1, y1, z1, x2, y1, z1, r, g, b, a);
+        line(buf, mat, x2, y1, z1, x2, y1, z2, r, g, b, a);
+        line(buf, mat, x2, y1, z2, x1, y1, z2, r, g, b, a);
+        line(buf, mat, x1, y1, z2, x1, y1, z1, r, g, b, a);
+        // Верхний квадрат
+        line(buf, mat, x1, y2, z1, x2, y2, z1, r, g, b, a);
+        line(buf, mat, x2, y2, z1, x2, y2, z2, r, g, b, a);
+        line(buf, mat, x2, y2, z2, x1, y2, z2, r, g, b, a);
+        line(buf, mat, x1, y2, z2, x1, y2, z1, r, g, b, a);
+        // Вертикальные рёбра + высокий луч вверх на 12 блоков
+        line(buf, mat, x1, y1, z1, x1, y2, z1, r, g, b, a);
+        line(buf, mat, x2, y1, z1, x2, y2, z1, r, g, b, a);
+        line(buf, mat, x2, y1, z2, x2, y2, z2, r, g, b, a);
+        line(buf, mat, x1, y1, z2, x1, y2, z2, r, g, b, a);
+        line(buf, mat, (float) bx + 0.5f, y2, (float) bz + 0.5f, (float) bx + 0.5f, y2 + 12.0f, (float) bz + 0.5f, 1.0f, 0.92f, 0.2f, 0.6f);
+
+        var built = buf.endNullable();
+        if (built != null) {
+            com.mojang.blaze3d.systems.BufferRenderer.drawWithGlobalProgram(built);
+        }
+
+        // 2. Парящая подпись с названием и расстоянием (масштабируется, чтобы читаться издалека)
+        double dist = Math.sqrt(
+                Math.pow(target.x + 0.5 - client.player.getX(), 2) +
+                Math.pow(target.y + 0.5 - client.player.getY(), 2) +
+                Math.pow(target.z + 0.5 - client.player.getZ(), 2)
+        );
+        String label = "★ " + target.name + " (" + (int) dist + " м)";
+
+        matrices.push();
+        matrices.translate(bx + 0.5, by + 1.6, bz + 0.5);
+        matrices.multiply(camera.getRotation());
+        float scale = (float) Math.max(0.025, dist * 0.0045);
+        matrices.scale(scale, -scale, scale);
+
+        TextRenderer tr = client.textRenderer;
+        int tw = tr.getWidth(label);
+        VertexConsumerProvider.Immediate immediate = client.getBufferBuilders().getEntityVertexConsumers();
+        tr.draw(label, -tw / 2.0f, 0, 0xFFFFD700, true, matrices.peek().getPositionMatrix(), immediate, TextRenderer.TextLayerType.SEE_THROUGH, 0x99000000, 15728880);
+        immediate.draw();
+        matrices.pop();
+
+        RenderSystem.enableDepthTest();
+        RenderSystem.enableCull();
+        RenderSystem.disableBlend();
+        matrices.pop();
+    }
+
+    private void line(BufferBuilder buf, Matrix4f mat, float x1, float y1, float z1, float x2, float y2, float z2, float r, float g, float b, float a) {
+        buf.vertex(mat, x1, y1, z1).color(r, g, b, a);
+        buf.vertex(mat, x2, y2, z2).color(r, g, b, a);
+    }
+
     private void checkOpenedContainer(MinecraftClient client) {
-        if (recordMode == 0 || client.player == null) {
+        if (client.player == null) {
             lastHandledScreen = null;
             return;
         }
 
         Screen current = client.currentScreen;
-        // Если открыт контейнер (сундук, бочка, серверное меню лута), но не обычный инвентарь (E)
         if (current instanceof HandledScreen<?> && !(current instanceof InventoryScreen) && !(current instanceof CreativeInventoryScreen)) {
             if (current != lastHandledScreen) {
                 lastHandledScreen = current;
 
-                // Определяем координаты: блок под прицелом или позиция игрока
                 BlockPos targetPos = client.player.getBlockPos();
                 if (client.crosshairTarget != null && client.crosshairTarget.getType() == HitResult.Type.BLOCK) {
                     targetPos = ((BlockHitResult) client.crosshairTarget).getBlockPos();
                 }
 
-                if (recordMode == 1) {
-                    recordMode = 2;
-                    recordedChestsCount = 0;
-                    MapStorage.data.farmRoute.clear();
-                    MapStorage.data.farmRoute.add(new MapStorage.RoutePoint(targetPos.getX(), targetPos.getZ()));
-                }
-
-                // Проверка на дубликат в радиусе 2 блоков
-                boolean alreadyMarked = false;
-                for (MapStorage.Waypoint wp : MapStorage.data.marks) {
-                    if ("CHEST".equals(wp.type)
-                            && Math.abs(wp.x - targetPos.getX()) <= 2
-                            && Math.abs(wp.z - targetPos.getZ()) <= 2
-                            && Math.abs(wp.y - targetPos.getY()) <= 3) {
-                        alreadyMarked = true;
-                        break;
-                    }
-                }
-
-                if (!alreadyMarked) {
-                    recordedChestsCount++;
-                    MapStorage.data.marks.add(new MapStorage.Waypoint(
-                            "Сундук #" + recordedChestsCount, "CHEST",
-                            targetPos.getX(), targetPos.getY(), targetPos.getZ()
-                    ));
-                    MapStorage.data.farmRoute.add(new MapStorage.RoutePoint(targetPos.getX(), targetPos.getZ()));
-                    MapStorage.save();
-
-                    client.player.sendMessage(Text.literal("§6[RouteMap] §aОтмечен Сундук #" + recordedChestsCount + " §7(" + targetPos.getX() + ", " + targetPos.getZ() + ")"), true);
-                }
-            }
-        } else if (current == null) {
-            lastHandledScreen = null;
-        }
-    }
-
-    private void scanTerrain(MinecraftClient client) {
-        World world = client.world;
-        if (world == null || client.player == null) return;
-
-        int px = (int) Math.floor(client.player.getX());
-        int pz = (int) Math.floor(client.player.getZ());
-        int radius = 48;
-
-        BlockPos.Mutable pos = new BlockPos.Mutable();
-        for (int dx = -radius; dx <= radius; dx += 2) {
-            for (int dz = -radius; dz <= radius; dz += 2) {
-                int wx = (px + dx) & ~1;
-                int wz = (pz + dz) & ~1;
-
-                int topY = world.getTopY(Heightmap.Type.MOTION_BLOCKING_NO_LEAVES, wx, wz) - 1;
-                if (topY < world.getBottomY()) continue;
-
-                pos.set(wx, topY, wz);
-                BlockState state = world.getBlockState(pos);
-                MapColor mapColor = state.getMapColor(world, pos);
-                if (mapColor == MapColor.CLEAR) continue;
-
-                int rgb = mapColor.color & 0xFFFFFF;
-                int packedVal = ((topY & 0xFF) << 24) | rgb;
-                long key = MapStorage.packGrid(wx >> 1, wz >> 1);
-
-                Integer old = MapStorage.terrain.get(key);
-                if (old == null || old != packedVal) {
-                    MapStorage.terrain.put(key, packedVal);
-                    terrainDirty = true;
-                }
-            }
-        }
-    }
-
-    private void recordStep(MinecraftClient client) {
-        int px = (int) Math.floor(client.player.getX());
-        int pz = (int) Math.floor(client.player.getZ());
-
-        appendPoint(MapStorage.data.trail, px, pz, 15000);
-
-        if (recordMode == 2) {
-            appendPoint(MapStorage.data.farmRoute, px, pz, 10000);
-        }
-    }
-
-    private void appendPoint(List<MapStorage.RoutePoint> list, int px, int pz, int maxLen) {
-        if (list.isEmpty()) {
-            list.add(new MapStorage.RoutePoint(px, pz));
-            MapStorage.save();
-            return;
-        }
-
-        MapStorage.RoutePoint last = list.get(list.size() - 1);
-        double dist = Math.hypot(px - last.x, pz - last.z);
-
-        if (dist > 120) {
-            list.add(new MapStorage.RoutePoint(Integer.MIN_VALUE, Integer.MIN_VALUE));
-            list.add(new MapStorage.RoutePoint(px, pz));
-            MapStorage.save();
-        } else if (dist >= 3) {
-            list.add(new MapStorage.RoutePoint(px, pz));
-            if (list.size() > maxLen) {
-                list.remove(0);
-            }
-            MapStorage.save();
-        }
-    }
-
-    public static class FullMapScreen extends Screen {
-        private double centerX, centerZ;
-        private double zoom = 1.5;
-
-        public FullMapScreen() {
-            super(Text.literal("Карта маршрута"));
-        }
-
-        private String getRecordButtonText() {
-            return switch (recordMode) {
-                case 1 -> "§eЖду 1-й сундук...";
-                case 2 -> "§aИдёт запись (" + recordedChestsCount + ")";
-                default -> "Запись лута: ВЫКЛ";
-            };
-        }
-
-        @Override
-        protected void init() {
-            if (client != null && client.player != null) {
-                centerX = client.player.getX();
-                centerZ = client.player.getZ();
-            }
-
-            addDrawableChild(ButtonWidget.builder(Text.literal("+"), b -> zoom = Math.min(8.0, zoom * 1.4))
-                    .dimensions(10, 10, 22, 20).build());
-            addDrawableChild(ButtonWidget.builder(Text.literal("-"), b -> zoom = Math.max(0.25, zoom / 1.4))
-                    .dimensions(34, 10, 22, 20).build());
-            addDrawableChild(ButtonWidget.builder(Text.literal("Я"), b -> {
-                if (client != null && client.player != null) {
-                    centerX = client.player.getX();
-                    centerZ = client.player.getZ();
-                }
-            }).dimensions(58, 10, 22, 20).build());
-
-            addDrawableChild(ButtonWidget.builder(Text.literal("+ Метка (B)"), b -> {
-                if (client != null && client.player != null) {
-                    client.setScreen(new AddMarkScreen(
+                // А. Если запущено ПРОХОЖДЕНИЕ маршрута — проверяем, открыл ли игрок нужный сундук
+                MapStorage.Waypoint runTarget = getCurrentRunTarget();
+                if (runTarget != null) {
+double d = Math.hypot(client.player.getX() - (runTarget.x + 0.5), client.player.getZ() - (runTarget.z + 0.5));
+double dBlock = Math.hypot(targetPos.getX() - runTarget.x, targetPos.getZ() - runTarget.z);
+if (d <= 6.5 || dBlock <= 4.0) {
+List<MapStorage.Waypoint> chests = getChestMarks();
+activeRunIndex++;
+if (activeRunIndex >= chests.size()) {
+activeRunIndex = 0; // Зацикливаем на 1-й сундук для нового круга фарма!
+client.player.sendMessage(Text.literal("§6[RouteMap] §aКруг завершён! Подсвечен снова §e" + chests.get(0).name), true);
+} else {
+client.player.sendMessage(Text.literal("§6[RouteMap] §aГотово! Следующая цель: §e" + chests.get(activeRunIndex).name), true);
+}
+}
+}
+// Б. Если включена ЗАПИСЬ нового маршрута
+if (recordMode != 0) {
+if (recordMode == 1) {
+recordMode = 2;
+recordedChestsCount = 0;
+MapStorage.data.farmRoute.clear();
+MapStorage.data.farmRoute.add(new MapStorage.RoutePoint(targetPos.getX(), targetPos.getZ()));
+}
+boolean alreadyMarked = false;
+for (MapStorage.Waypoint wp : MapStorage.data.marks) {
+if ("CHEST".equals(wp.type)
+&& Math.abs(wp.x - targetPos.getX()) <= 2
+&& Math.abs(wp.z - targetPos.getZ()) <= 2
+&& Math.abs(wp.y - targetPos.getY()) <= 3) {
+alreadyMarked = true;
+break;
+}
+}
+if (!alreadyMarked) {
+recordedChestsCount++;
+MapStorage.data.marks.add(new MapStorage.Waypoint(
+"Сундук #" + recordedChestsCount, "CHEST",
+targetPos.getX(), targetPos.getY(), targetPos.getZ()
+));
+MapStorage.data.farmRoute.add(new MapStorage.RoutePoint(targetPos.getX(), targetPos.getZ()));
+MapStorage.save();
+client.player.sendMessage(Text.literal("§6[RouteMap] §aОтмечен Сундук #" + recordedChestsCount + " §7(" + targetPos.getX() + ", " + targetPos.getZ() + ")"), true);
+}
+}
+}
+} else if (current == null) {
+lastHandledScreen = null;
+}
+}
+private void scanTerrain(MinecraftClient client) {
+World world = client.world;
+if (world == null || client.player == null) return;
+int px = (int) Math.floor(client.player.getX());
+int pz = (int) Math.floor(client.player.getZ());
+int radius = 48;
+BlockPos.Mutable pos = new BlockPos.Mutable();
+for (int dx = -radius; dx <= radius; dx += 2) {
+for (int dz = -radius; dz <= radius; dz += 2) {
+int wx = (px + dx) & ~1;
+int wz = (pz + dz) & ~1;
+int topY = world.getTopY(Heightmap.Type.MOTION_BLOCKING_NO_LEAVES, wx, wz) - 1;
+if (topY < world.getBottomY()) continue;
+pos.set(wx, topY, wz);
+BlockState state = world.getBlockState(pos);
+MapColor mapColor = state.getMapColor(world, pos);
+if (mapColor == MapColor.CLEAR) continue;
+int rgb = mapColor.color & 0xFFFFFF;
+int packedVal = ((topY & 0xFF) << 24) | rgb;
+long key = MapStorage.packGrid(wx >> 1, wz >> 1);
+Integer old = MapStorage.terrain.get(key);
+if (old == null || old != packedVal) {
+MapStorage.terrain.put(key, packedVal);
+terrainDirty = true;
+}
+}
+}
+}
+private void recordStep(MinecraftClient client) {
+int px = (int) Math.floor(client.player.getX());
+int pz = (int) Math.floor(client.player.getZ());
+appendPoint(MapStorage.data.trail, px, pz, 15000);
+if (recordMode == 2) {
+appendPoint(MapStorage.data.farmRoute, px, pz, 10000);
+}
+}
+private void appendPoint(List<MapStorage.RoutePoint> list, int px, int pz, int maxLen) {
+if (list.isEmpty()) {
+list.add(new MapStorage.RoutePoint(px, pz));
+MapStorage.save();
+return;
+}
+MapStorage.RoutePoint last = list.get(list.size() - 1);
+double dist = Math.hypot(px - last.x, pz - last.z);
+if (dist > 120) {
+list.add(new MapStorage.RoutePoint(Integer.MIN_VALUE, Integer.MIN_VALUE));
+list.add(new MapStorage.RoutePoint(px, pz));
+MapStorage.save();
+} else if (dist >= 3) {
+list.add(new MapStorage.RoutePoint(px, pz));
+if (list.size() > maxLen) {
+list.remove(0);
+}
+MapStorage.save();
+}
+}
+public static class FullMapScreen extends Screen {
+private double centerX, centerZ;
+private double zoom = 1.5;
+public FullMapScreen() {
+super(Text.literal("Карта маршрута"));
+}
+private String getRecordButtonText() {
+return switch (recordMode) {
+case 1 -> "§eЖду 1-й сундук...";
+case 2 -> "§aЗапись (" + recordedChestsCount + ")";
+default -> "Записать лут";
+};
+}
+private String getRunButtonText() {
+MapStorage.Waypoint target = getCurrentRunTarget();
+if (target == null) return "Запустить маршрут";
+return "§6Цель: " + target.name;
+}
+@Override
+protected void init() {
+if (client != null && client.player != null) {
+centerX = client.player.getX();
+centerZ = client.player.getZ();
+}
+addDrawableChild(ButtonWidget.builder(Text.literal("+"), b -> zoom = Math.min(8.0, zoom * 1.4))
+.dimensions(10, 10, 20, 20).build());
+addDrawableChild(ButtonWidget.builder(Text.literal("-"), b -> zoom = Math.max(0.25, zoom / 1.4))
+.dimensions(32, 10, 20, 20).build());
+addDrawableChild(ButtonWidget.builder(Text.literal("Я"), b -> {
+if (client != null && client.player != null) {
+centerX = client.player.getX();
+centerZ = client.player.getZ();
+}
+}).dimensions(54, 10, 20, 20).build());
+addDrawableChild(ButtonWidget.builder(Text.literal("+ Метка"), b -> {
+if (client != null && client.player != null) {
+client.setScreen(new AddMarkScreen(
 (int) Math.floor(client.player.getX()),
 (int) Math.floor(client.player.getY()),
 (int) Math.floor(client.player.getZ())
 ));
 }
-}).dimensions(84, 10, 74, 20).build());
+}).dimensions(78, 10, 54, 20).build());
+// Кнопка записи маршрута
 addDrawableChild(ButtonWidget.builder(Text.literal(getRecordButtonText()), b -> {
 if (recordMode == 0) {
 recordMode = 1;
+activeRunIndex = -1;
 } else {
 recordMode = 0;
 MapStorage.save();
 }
 b.setMessage(Text.literal(getRecordButtonText()));
-}).dimensions(162, 10, 125, 20).build());
+}).dimensions(136, 10, 96, 20).build());
+// Кнопка ЗАПУСКА маршрута с 3D-подсветкой в мире
+addDrawableChild(ButtonWidget.builder(Text.literal(getRunButtonText()), b -> {
+if (activeRunIndex < 0) {
+List<MapStorage.Waypoint> chests = getChestMarks();
+if (!chests.isEmpty()) {
+recordMode = 0;
+activeRunIndex = 0;
+}
+} else {
+activeRunIndex = -1;
+}
+b.setMessage(Text.literal(getRunButtonText()));
+}).dimensions(236, 10, 118, 20).build());
 addDrawableChild(ButtonWidget.builder(Text.literal("Сброс лута"), b -> {
 recordMode = 0;
+activeRunIndex = -1;
 recordedChestsCount = 0;
 MapStorage.data.farmRoute.clear();
 MapStorage.save();
-}).dimensions(width - 178, 10, 76, 20).build());
+}).dimensions(width - 166, 10, 72, 20).build());
 addDrawableChild(ButtonWidget.builder(Text.literal("Очистить след"), b -> {
 MapStorage.data.trail.clear();
 MapStorage.save();
-}).dimensions(width - 98, 10, 88, 20).build());
+}).dimensions(width - 90, 10, 80, 20).build());
 }
 @Override
 public boolean mouseClicked(Click click, boolean doubled) {
@@ -287,6 +429,12 @@ int sy = (int) (midY + (wp.z - centerZ) * zoom);
 if (Math.hypot(mx - sx, my - sy) <= 8) {
 if (click.button() == 0) {
 selectedMark = (selectedMark == wp) ? null : wp;
+// Если кликнули ЛКМ по сундуку во время запущенного маршрута — переключаем подсветку на него
+if ("CHEST".equals(wp.type) && activeRunIndex >= 0) {
+List<MapStorage.Waypoint> chests = getChestMarks();
+int idx = chests.indexOf(wp);
+if (idx >= 0) activeRunIndex = idx;
+}
 return true;
 } else if (click.button() == 1) {
 if (selectedMark == wp) selectedMark = null;
@@ -323,6 +471,7 @@ super.render(ctx, mouseX, mouseY, delta);
 if (client == null || client.player == null) return;
 int midX = width / 2;
 int midY = height / 2;
+// Рельеф местности
 int minGX = (int) Math.floor((centerX - midX / zoom) / 2.0) - 1;
 int maxGX = (int) Math.ceil((centerX + midX / zoom) / 2.0) + 1;
 int minGZ = (int) Math.floor((centerZ - (midY - 36) / zoom) / 2.0) - 1;
@@ -359,9 +508,11 @@ renderPolyline(ctx, MapStorage.data.trail, midX, midY, 0x66FFFFFF, 1);
 renderPolyline(ctx, MapStorage.data.farmRoute, midX, midY, 0xFFFFD700, 3);
 int px = (int) (midX + (client.player.getX() - centerX) * zoom);
 int py = (int) (midY + (client.player.getZ() - centerZ) * zoom);
-if (selectedMark != null && MapStorage.data.marks.contains(selectedMark)) {
-int tx = (int) (midX + (selectedMark.x - centerX) * zoom);
-int ty = (int) (midY + (selectedMark.z - centerZ) * zoom);
+MapStorage.Waypoint runTarget = getCurrentRunTarget();
+MapStorage.Waypoint lineTarget = (runTarget != null) ? runTarget : selectedMark;
+if (lineTarget != null && MapStorage.data.marks.contains(lineTarget)) {
+int tx = (int) (midX + (lineTarget.x - centerX) * zoom);
+int ty = (int) (midY + (lineTarget.z - centerZ) * zoom);
 drawLine(ctx, px, py, tx, ty, 0xFFFF5500, 2);
 } else {
 selectedMark = null;
@@ -370,12 +521,13 @@ for (MapStorage.Waypoint wp : MapStorage.data.marks) {
 int sx = (int) (midX + (wp.x - centerX) * zoom);
 int sy = (int) (midY + (wp.z - centerZ) * zoom);
 if (sy <= 35 || sy >= height - 18) continue;
+boolean isHighlighted = (wp == selectedMark || wp == runTarget);
 int color = switch (wp.type) {
 case "CHEST" -> 0xFFFACC15;
 case "FARM" -> 0xFF4ADE80;
 default -> 0xFF22D3EE;
 };
-int size = (wp == selectedMark) ? 5 : 3;
+int size = isHighlighted ? 5 : 3;
 ctx.fill(sx - size - 1, sy - size - 1, sx + size + 1, sy + size + 1, 0xFF000000);
 ctx.fill(sx - size, sy - size, sx + size, sy + size, color);
 String tag = wp.name + " (" + wp.x + ", " + wp.z + ")";
@@ -386,11 +538,11 @@ ctx.drawTextWithShadow(textRenderer, tag, sx + 7, sy - 4, color);
 ctx.fill(px - 4, py - 4, px + 4, py + 4, 0xFF000000);
 ctx.fill(px - 3, py - 3, px + 3, py + 3, 0xFFEF4444);
 String targetText = "";
-if (selectedMark != null) {
-int dist = (int) Math.hypot(selectedMark.x - client.player.getX(), selectedMark.z - client.player.getZ());
-targetText = " | Цель: " + selectedMark.name + " (" + dist + " бл.)";
+if (lineTarget != null) {
+int dist = (int) Math.hypot(lineTarget.x - client.player.getX(), lineTarget.z - client.player.getZ());
+targetText = " | Цель: " + lineTarget.name + " (" + dist + " бл.)";
 }
-String info = String.format("Корды: %d, %d%s | ЛКМ = маршрут, ПКМ = поставить/удалить",
+String info = String.format("Корды: %d, %d%s | ЛКМ = выбрать, ПКМ = поставить/удалить",
 (int) client.player.getX(), (int) client.player.getZ(), targetText);
 ctx.drawTextWithShadow(textRenderer, info, 10, height - 14, 0xFFCBD5E1);
 }
