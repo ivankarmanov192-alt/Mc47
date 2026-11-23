@@ -7,17 +7,26 @@ import net.fabricmc.loader.api.FabricLoader;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
 
 public class MapStorage {
     private static final Gson GSON = new GsonBuilder().setPrettyPrinting().create();
+    private static final Gson COMPACT_GSON = new Gson();
     private static final Path FILE = FabricLoader.getInstance().getConfigDir().resolve("routemap.json");
+    private static final Path TERRAIN_FILE = FabricLoader.getInstance().getConfigDir().resolve("routemap_terrain.json");
 
     public static MapData data = new MapData();
+    public static Map<Long, Integer> terrain = new HashMap<>(); // key: packed (gx, gz), val: (y << 24) | rgb
 
     public static class MapData {
         public List<RoutePoint> trail = new ArrayList<>();
         public List<Waypoint> marks = new ArrayList<>();
+    }
+
+    public static class TerrainData {
+        public Map<String, Integer> cells = new HashMap<>();
     }
 
     public static class RoutePoint {
@@ -39,6 +48,10 @@ public class MapStorage {
         }
     }
 
+    public static long packGrid(int gx, int gz) {
+        return (((long) gx) << 32) | (gz & 0xFFFFFFFFL);
+    }
+
     public static void load() {
         try {
             if (Files.exists(FILE)) {
@@ -46,6 +59,15 @@ public class MapStorage {
                 if (data == null) data = new MapData();
                 if (data.trail == null) data.trail = new ArrayList<>();
                 if (data.marks == null) data.marks = new ArrayList<>();
+            }
+            if (Files.exists(TERRAIN_FILE)) {
+                TerrainData td = COMPACT_GSON.fromJson(Files.readString(TERRAIN_FILE), TerrainData.class);
+                terrain.clear();
+                if (td != null && td.cells != null) {
+                    for (Map.Entry<String, Integer> e : td.cells.entrySet()) {
+                        terrain.put(Long.parseLong(e.getKey()), e.getValue());
+                    }
+                }
             }
         } catch (Exception e) {
             e.printStackTrace();
@@ -55,6 +77,18 @@ public class MapStorage {
     public static void save() {
         try {
             Files.writeString(FILE, GSON.toJson(data));
+        } catch (Exception e) {
+            e.printStackTrace();
+        }
+    }
+
+    public static void saveTerrain() {
+        try {
+            TerrainData td = new TerrainData();
+            for (Map.Entry<Long, Integer> e : terrain.entrySet()) {
+                td.cells.put(Long.toString(e.getKey()), e.getValue());
+            }
+            Files.writeString(TERRAIN_FILE, COMPACT_GSON.toJson(td));
         } catch (Exception e) {
             e.printStackTrace();
         }
