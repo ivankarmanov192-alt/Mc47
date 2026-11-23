@@ -19,6 +19,7 @@ import java.util.List;
 public class RouteMapClient implements ClientModInitializer {
     private static KeyBinding openMapKey;
     private static KeyBinding addMarkKey;
+    private static MapStorage.Waypoint selectedMark = null;
     private int tickCounter = 0;
 
     @Override
@@ -39,7 +40,11 @@ public class RouteMapClient implements ClientModInitializer {
                 client.setScreen(new FullMapScreen());
             }
             while (addMarkKey.wasPressed()) {
-                client.setScreen(new AddMarkScreen());
+                client.setScreen(new AddMarkScreen(
+                        (int) Math.floor(client.player.getX()),
+                        (int) Math.floor(client.player.getY()),
+                        (int) Math.floor(client.player.getZ())
+                ));
             }
 
             tickCounter++;
@@ -51,12 +56,10 @@ public class RouteMapClient implements ClientModInitializer {
     }
 
     private void recordStep(MinecraftClient client) {
-        String dim = client.world.getRegistryKey().getValue().toString();
-        MapStorage.DimensionData worldData = MapStorage.getWorld(dim);
         int px = (int) Math.floor(client.player.getX());
         int pz = (int) Math.floor(client.player.getZ());
 
-        List<MapStorage.RoutePoint> trail = worldData.trail;
+        List<MapStorage.RoutePoint> trail = MapStorage.data.trail;
         if (trail.isEmpty()) {
             trail.add(new MapStorage.RoutePoint(px, pz));
             MapStorage.save();
@@ -104,16 +107,64 @@ public class RouteMapClient implements ClientModInitializer {
                     centerZ = client.player.getZ();
                 }
             }).dimensions(66, 10, 24, 20).build());
+
             addDrawableChild(ButtonWidget.builder(Text.literal("+ Метка (B)"), b -> {
-                if (client != null) client.setScreen(new AddMarkScreen());
-            }).dimensions(94, 10, 80, 20).build());
-            addDrawableChild(ButtonWidget.builder(Text.literal("Очистить след"), b -> {
-                if (client != null && client.world != null) {
-                    String dim = client.world.getRegistryKey().getValue().toString();
-                    MapStorage.getWorld(dim).trail.clear();
-                    MapStorage.save();
+                if (client != null && client.player != null) {
+                    client.setScreen(new AddMarkScreen(
+                            (int) Math.floor(client.player.getX()),
+                            (int) Math.floor(client.player.getY()),
+                            (int) Math.floor(client.player.getZ())
+                    ));
                 }
+            }).dimensions(94, 10, 80, 20).build());
+
+            addDrawableChild(ButtonWidget.builder(Text.literal("Очистить след"), b -> {
+                MapStorage.data.trail.clear();
+                MapStorage.save();
             }).dimensions(width - 105, 10, 95, 20).build());
+        }
+
+        @Override
+        public boolean mouseClicked(Click click, boolean doubled) {
+            if (super.mouseClicked(click, doubled)) return true;
+            if (client == null || client.player == null) return false;
+
+            double mx = click.x();
+            double my = click.y();
+            if (my <= 35 || my >= height - 18) return false;
+
+            int midX = width / 2;
+            int midY = height / 2;
+            List<MapStorage.Waypoint> marks = MapStorage.data.marks;
+
+            // Клик по существующей метке
+            for (int i = marks.size() - 1; i >= 0; i--) {
+                MapStorage.Waypoint wp = marks.get(i);
+                int sx = (int) (midX + (wp.x - centerX) * zoom);
+                int sy = (int) (midY + (wp.z - centerZ) * zoom);
+
+                if (Math.hypot(mx - sx, my - sy) <= 8) {
+                    if (click.button() == 0) { // ЛКМ - выбрать как цель
+                        selectedMark = (selectedMark == wp) ? null : wp;
+                        return true;
+                    } else if (click.button() == 1) { // ПКМ - удалить метку
+                        if (selectedMark == wp) selectedMark = null;
+                        marks.remove(i);
+                        MapStorage.save();
+                        return true;
+                    }
+                }
+            }
+
+            // ПКМ по пустому месту - поставить новую метку
+            if (click.button() == 1) {
+                int wx = (int) Math.round(centerX + (mx - midX) / zoom);
+                int wz = (int) Math.round(centerZ + (my - midY) / zoom);
+                client.setScreen(new AddMarkScreen(wx, (int) Math.floor(client.player.getY()), wz));
+                return true;
+            }
+
+            return false;
         }
 
         @Override
@@ -135,13 +186,12 @@ public class RouteMapClient implements ClientModInitializer {
             ctx.fill(0, 0, width, height, 0xE6101318);
             super.render(ctx, mouseX, mouseY, delta);
 
-            if (client == null || client.player == null || client.world == null) return;
-            String dim = client.world.getRegistryKey().getValue().toString();
-            MapStorage.DimensionData worldData = MapStorage.getWorld(dim);
+            if (client == null || client.player == null) return;
 
             int midX = width / 2;
             int midY = height / 2;
 
+            // Сетка каждые 100 блоков
             int gridStep = 100;
             int startWorldX = (int) Math.floor((centerX - midX / zoom) / gridStep) * gridStep;
             int endWorldX = (int) Math.ceil((centerX + midX / zoom) / gridStep) * gridStep;
@@ -156,7 +206,8 @@ public class RouteMapClient implements ClientModInitializer {
                 ctx.fill(0, sy, width, sy + 1, 0x22FFFFFF);
             }
 
-            List<MapStorage.RoutePoint> trail = worldData.trail;
+            // След маршрута
+            List<MapStorage.RoutePoint> trail = MapStorage.data.trail;
             for (int i = 1; i < trail.size(); i++) {
                 MapStorage.RoutePoint p1 = trail.get(i - 1);
                 MapStorage.RoutePoint p2 = trail.get(i);
@@ -169,71 +220,85 @@ public class RouteMapClient implements ClientModInitializer {
                 drawLine(ctx, x1, y1, x2, y2, 0xFF38BDF8);
             }
 
-            for (MapStorage.Waypoint wp : worldData.marks) {
+            int px = (int) (midX + (client.player.getX() - centerX) * zoom);
+            int py = (int) (midY + (client.player.getZ() - centerZ) * zoom);
+
+            // Линия до выбранной цели
+            if (selectedMark != null && MapStorage.data.marks.contains(selectedMark)) {
+                int tx = (int) (midX + (selectedMark.x - centerX) * zoom);
+                int ty = (int) (midY + (selectedMark.z - centerZ) * zoom);
+                drawLine(ctx, px, py, tx, ty, 0xFFFB923C);
+            } else {
+                selectedMark = null;
+            }
+
+            // Метки
+            for (MapStorage.Waypoint wp : MapStorage.data.marks) {
                 int sx = (int) (midX + (wp.x - centerX) * zoom);
                 int sy = (int) (midY + (wp.z - centerZ) * zoom);
                 int color = switch (wp.type) {
                     case "CHEST" -> 0xFFFACC15;
-                    case "FARM" -> 0xFF4ADE80;
-                    default -> 0xFF22D3EE;
-                };
-                ctx.fill(sx - 4, sy - 4, sx + 4, sy + 4, 0xFF000000);
-                ctx.fill(sx - 3, sy - 3, sx + 3, sy + 3, color);
-                ctx.drawTextWithShadow(textRenderer, wp.name + " (" + wp.x + ", " + wp.z + ")", sx + 6, sy - 4, color);
-            }
-
-            int px = (int) (midX + (client.player.getX() - centerX) * zoom);
-            int py = (int) (midY + (client.player.getZ() - centerZ) * zoom);
-            ctx.fill(px - 4, py - 4, px + 4, py + 4, 0xFFFFFFFF);
-            ctx.fill(px - 3, py - 3, px + 3, py + 3, 0xFFEF4444);
-
-            String info = String.format("Мир: %s | Твои корды: %d, %d | Тяни мышью для сдвига, колёсико = зум",
-                    dim, (int) client.player.getX(), (int) client.player.getZ());
-            ctx.drawTextWithShadow(textRenderer, info, 10, height - 14, 0xFFCBD5E1);
-        }
-
-        private void drawLine(DrawContext ctx, int x0, int y0, int x1, int y1, int color) {
-            int dx = Math.abs(x1 - x0), sx = x0 < x1 ? 1 : -1;
-            int dy = -Math.abs(y1 - y0), sy = y0 < y1 ? 1 : -1;
-            int err = dx + dy, e2;
-            while (true) {
-                if (x0 >= 0 && x0 < width && y0 >= 34 && y0 < height - 18) {
-                    ctx.fill(x0, y0, x0 + 2, y0 + 2, color);
-                }
-                if (x0 == x1 && y0 == y1) break;
-                e2 = 2 * err;
-                if (e2 >= dy) { err += dy; x0 += sx; }
-                if (e2 <= dx) { err += dx; y0 += sy; }
-            }
-        }
-    }
-
-    public static class AddMarkScreen extends Screen {
-        private TextFieldWidget nameField;
-
-        public AddMarkScreen() {
-            super(Text.literal("Новая метка"));
-        }
-
-        @Override
-        protected void init() {
-            int cx = width / 2;
-            int cy = height / 2;
-
-            nameField = new TextFieldWidget(textRenderer, cx - 100, cy - 35, 200, 20, Text.literal("Название"));
-            nameField.setPlaceholder(Text.literal("Например: Сундук у скалы"));
-            addDrawableChild(nameField);
-            setInitialFocus(nameField);
-
-            addDrawableChild(ButtonWidget.builder(Text.literal("Сундук"), b -> saveMark("CHEST"))
-                    .dimensions(cx - 100, cy - 5, 64, 20).build());
-            addDrawableChild(ButtonWidget.builder(Text.literal("Ферма"), b -> saveMark("FARM"))
+case "FARM" -> 0xFF4ADE80;
+default -> 0xFF22D3EE;
+};
+int size = (wp == selectedMark) ? 5 : 3;
+ctx.fill(sx - size - 1, sy - size - 1, sx + size + 1, sy + size + 1, 0xFF000000);
+ctx.fill(sx - size, sy - size, sx + size, sy + size, color);
+ctx.drawTextWithShadow(textRenderer, wp.name + " (" + wp.x + ", " + wp.z + ")", sx + 6, sy - 4, color);
+}
+// Игрок
+ctx.fill(px - 4, py - 4, px + 4, py + 4, 0xFFFFFFFF);
+ctx.fill(px - 3, py - 3, px + 3, py + 3, 0xFFEF4444);
+// Нижняя панель
+String targetText = "";
+if (selectedMark != null) {
+int dist = (int) Math.hypot(selectedMark.x - client.player.getX(), selectedMark.z - client.player.getZ());
+targetText = " | Цель: " + selectedMark.name + " (" + dist + " бл.)";
+}
+String info = String.format("Корды: %d, %d%s | ЛКМ по метке = цель, ПКМ = поставить/удалить",
+(int) client.player.getX(), (int) client.player.getZ(), targetText);
+ctx.drawTextWithShadow(textRenderer, info, 10, height - 14, 0xFFCBD5E1);
+}
+private void drawLine(DrawContext ctx, int x0, int y0, int x1, int y1, int color) {
+int dx = Math.abs(x1 - x0), sx = x0 < x1 ? 1 : -1;
+int dy = -Math.abs(y1 - y0), sy = y0 < y1 ? 1 : -1;
+int err = dx + dy, e2;
+while (true) {
+if (x0 >= 0 && x0 < width && y0 >= 34 && y0 < height - 18) {
+ctx.fill(x0, y0, x0 + 2, y0 + 2, color);
+}
+if (x0 == x1 && y0 == y1) break;
+e2 = 2 * err;
+if (e2 >= dy) { err += dy; x0 += sx; }
+if (e2 <= dx) { err += dx; y0 += sy; }
+}
+}
+}
+public static class AddMarkScreen extends Screen {
+private TextFieldWidget nameField;
+private final int targetX, targetY, targetZ;
+public AddMarkScreen(int x, int y, int z) {
+super(Text.literal("Новая метка"));
+this.targetX = x;
+this.targetY = y;
+this.targetZ = z;
+}
+@Override
+protected void init() {
+int cx = width / 2;
+int cy = height / 2;
+nameField = new TextFieldWidget(textRenderer, cx - 100, cy - 35, 200, 20, Text.literal("Название"));
+nameField.setPlaceholder(Text.literal("Например: Сундук у скалы"));
+addDrawableChild(nameField);
+setInitialFocus(nameField);
+addDrawableChild(ButtonWidget.builder(Text.literal("Сундук"), b -> saveMark("CHEST"))
+.dimensions(cx - 100, cy - 5, 64, 20).build());
+addDrawableChild(ButtonWidget.builder(Text.literal("Ферма"), b -> saveMark("FARM"))
 .dimensions(cx - 32, cy - 5, 64, 20).build());
 addDrawableChild(ButtonWidget.builder(Text.literal("Точка"), b -> saveMark("POINT"))
 .dimensions(cx + 36, cy - 5, 64, 20).build());
 }
 private void saveMark(String type) {
-if (client != null && client.player != null && client.world != null) {
 String title = nameField.getText().trim();
 if (title.isEmpty()) {
 title = switch (type) {
@@ -242,22 +307,19 @@ case "FARM" -> "Ферма";
 default -> "Точка";
 };
 }
-String dim = client.world.getRegistryKey().getValue().toString();
-MapStorage.getWorld(dim).marks.add(new MapStorage.Waypoint(
-title, type,
-(int) Math.floor(client.player.getX()),
-(int) Math.floor(client.player.getY()),
-(int) Math.floor(client.player.getZ())
-));
+MapStorage.Waypoint wp = new MapStorage.Waypoint(title, type, targetX, targetY, targetZ);
+MapStorage.data.marks.add(wp);
+selectedMark = wp;
 MapStorage.save();
-client.setScreen(new FullMapScreen());
-}
+if (client != null) client.setScreen(new FullMapScreen());
 }
 @Override
 public void render(DrawContext ctx, int mouseX, int mouseY, float delta) {
 ctx.fill(0, 0, width, height, 0xAA000000);
 super.render(ctx, mouseX, mouseY, delta);
-ctx.drawCenteredTextWithShadow(textRenderer, "Поставить метку на текущих координатах", width / 2, height / 2 - 55, 0xFFFFFFFF);
+ctx.drawCenteredTextWithShadow(textRenderer,
+"Метка на координатах: " + targetX + ", " + targetZ,
+width / 2, height / 2 - 55, 0xFFFFFFFF);
 }
 }
 }
