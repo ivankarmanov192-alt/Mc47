@@ -22,8 +22,20 @@ public class MapStorage {
 
     public static class MapData {
         public List<RoutePoint> trail = new ArrayList<>();
-        public List<RoutePoint> farmRoute = new ArrayList<>(); // Золотой маршрут фарма сундуков
+        public List<RoutePoint> farmRoute = new ArrayList<>();
         public List<Waypoint> marks = new ArrayList<>();
+        public HudConfig config = new HudConfig();
+    }
+
+    public static class HudConfig {
+        // Позиции элементов в процентах экрана (0.0 .. 1.0), чтобы работало при любом разрешении
+        public float badgeX = 0.50f;
+        public float badgeY = 0.08f; // По центру под серверным компасом, не мешает полоске HP слева
+        public float backX = 0.50f;
+        public float backY = 0.82f;
+        public int themeIndex = 0;   // 0=Золотой, 1=Бирюзовый, 2=Зелёный, 3=Красный, 4=Фиолетовый, 5=Белый
+        public boolean smoothAnim = false; // По умолчанию выключено, без "резиновой" задержки
+        public boolean showBadge = true;
     }
 
     public static class TerrainData {
@@ -37,7 +49,7 @@ public class MapStorage {
 
     public static class Waypoint {
         public String name;
-        public String type; // CHEST, FARM, POINT
+        public String type;
         public int x, y, z;
 
         public Waypoint(String name, String type, int x, int y, int z) {
@@ -61,6 +73,7 @@ public class MapStorage {
                 if (data.trail == null) data.trail = new ArrayList<>();
                 if (data.farmRoute == null) data.farmRoute = new ArrayList<>();
                 if (data.marks == null) data.marks = new ArrayList<>();
+                if (data.config == null) data.config = new HudConfig();
             }
             if (Files.exists(TERRAIN_FILE)) {
                 TerrainData td = COMPACT_GSON.fromJson(Files.readString(TERRAIN_FILE), TerrainData.class);
