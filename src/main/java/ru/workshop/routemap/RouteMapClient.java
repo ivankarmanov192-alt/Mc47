@@ -4,6 +4,7 @@ import net.fabricmc.api.ClientModInitializer;
 import net.fabricmc.fabric.api.client.event.lifecycle.v1.ClientTickEvents;
 import net.fabricmc.fabric.api.client.keybinding.v1.KeyBindingHelper;
 import net.minecraft.client.MinecraftClient;
+import net.minecraft.client.gui.Click;
 import net.minecraft.client.gui.DrawContext;
 import net.minecraft.client.gui.screen.Screen;
 import net.minecraft.client.gui.widget.ButtonWidget;
@@ -25,10 +26,10 @@ public class RouteMapClient implements ClientModInitializer {
         MapStorage.load();
 
         openMapKey = KeyBindingHelper.registerKeyBinding(new KeyBinding(
-                "key.routemap.open", InputUtil.Type.KEYSYM, GLFW.GLFW_KEY_M, "category.routemap"
+                "key.routemap.open", InputUtil.Type.KEYSYM, GLFW.GLFW_KEY_M, KeyBinding.Category.MISC
         ));
         addMarkKey = KeyBindingHelper.registerKeyBinding(new KeyBinding(
-                "key.routemap.mark", InputUtil.Type.KEYSYM, GLFW.GLFW_KEY_B, "category.routemap"
+                "key.routemap.mark", InputUtil.Type.KEYSYM, GLFW.GLFW_KEY_B, KeyBinding.Category.MISC
         ));
 
         ClientTickEvents.END_CLIENT_TICK.register(client -> {
@@ -116,7 +117,7 @@ public class RouteMapClient implements ClientModInitializer {
         }
 
         @Override
-        public boolean mouseDragged(double mouseX, double mouseY, int button, double deltaX, double deltaY) {
+        public boolean mouseDragged(Click click, double deltaX, double deltaY) {
             centerX -= deltaX / zoom;
             centerZ -= deltaY / zoom;
             return true;
