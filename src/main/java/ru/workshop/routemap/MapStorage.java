@@ -7,21 +7,15 @@ import net.fabricmc.loader.api.FabricLoader;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayList;
-import java.util.HashMap;
 import java.util.List;
-import java.util.Map;
 
 public class MapStorage {
     private static final Gson GSON = new GsonBuilder().setPrettyPrinting().create();
     private static final Path FILE = FabricLoader.getInstance().getConfigDir().resolve("routemap.json");
 
-    public static RootData data = new RootData();
+    public static MapData data = new MapData();
 
-    public static class RootData {
-        public Map<String, DimensionData> worlds = new HashMap<>();
-    }
-
-    public static class DimensionData {
+    public static class MapData {
         public List<RoutePoint> trail = new ArrayList<>();
         public List<Waypoint> marks = new ArrayList<>();
     }
@@ -45,15 +39,13 @@ public class MapStorage {
         }
     }
 
-    public static DimensionData getWorld(String dimId) {
-        return data.worlds.computeIfAbsent(dimId, k -> new DimensionData());
-    }
-
     public static void load() {
         try {
             if (Files.exists(FILE)) {
-                data = GSON.fromJson(Files.readString(FILE), RootData.class);
-                if (data == null) data = new RootData();
+                data = GSON.fromJson(Files.readString(FILE), MapData.class);
+                if (data == null) data = new MapData();
+                if (data.trail == null) data.trail = new ArrayList<>();
+                if (data.marks == null) data.marks = new ArrayList<>();
             }
         } catch (Exception e) {
             e.printStackTrace();
