@@ -60,7 +60,7 @@ public class RouteMapClient implements ClientModInitializer {
                 "key.routemap.mark", InputUtil.Type.KEYSYM, GLFW.GLFW_KEY_B, KeyBinding.Category.MISC
         ));
 
-        // Подсветка целевого сундука прямо в мире через проекцию камеры (работает сквозь стены и с любыми шейдерами)
+        // Подсветка целевого сундука прямо в мире через проекцию камеры
         HudRenderCallback.EVENT.register((ctx, renderTickCounter) -> {
             MinecraftClient client = MinecraftClient.getInstance();
             if (client.player == null || client.world == null || client.currentScreen != null) return;
@@ -69,14 +69,13 @@ public class RouteMapClient implements ClientModInitializer {
             if (target == null) return;
 
             Camera camera = client.gameRenderer.getCamera();
-            Vec3d camPos = camera.getPos();
+            Vec3d camPos = client.player.getEyePos();
 
             double dx = (target.x + 0.5) - camPos.x;
             double dy = (target.y + 0.5) - camPos.y;
             double dz = (target.z + 0.5) - camPos.z;
             double dist = Math.sqrt(dx * dx + dy * dy + dz * dz);
 
-            // Переводим мировые координаты сундука в пространство камеры
             Vector3f rel = new Vector3f((float) dx, (float) dy, (float) dz);
             Quaternionf invRot = new Quaternionf(camera.getRotation()).conjugate();
             invRot.transform(rel);
@@ -84,7 +83,6 @@ public class RouteMapClient implements ClientModInitializer {
             int sw = client.getWindow().getScaledWidth();
             int sh = client.getWindow().getScaledHeight();
 
-            // В системе координат камеры Minecraft взгляд направлен вдоль -Z
             if (rel.z < -0.1f) {
                 double fov = Math.toRadians(client.options.getFov().getValue());
                 double scale = (sh / 2.0) / Math.tan(fov / 2.0);
@@ -92,11 +90,9 @@ public class RouteMapClient implements ClientModInitializer {
                 int sx = (int) (sw / 2.0 + (rel.x / -rel.z) * scale);
                 int sy = (int) (sh / 2.0 - (rel.y / -rel.z) * scale);
 
-                // Ограничиваем, чтобы маркер не улетал за края экрана
                 sx = Math.max(24, Math.min(sw - 24, sx));
                 sy = Math.max(24, Math.min(sh - 24, sy));
 
-                // Размер светящейся рамки зависит от расстояния до сундука
                 int box = (int) Math.max(6, Math.min(28, 140.0 / Math.max(3.0, dist)));
 
                 // Вертикальный золотой луч над сундуком
@@ -118,7 +114,6 @@ public class RouteMapClient implements ClientModInitializer {
                 ctx.fill(lx - 3, ly - 2, lx + tw + 3, ly + 10, 0xAA000000);
                 ctx.drawTextWithShadow(client.textRenderer, label, lx, ly, 0xFFFFD700);
             } else {
-                // Если сундук строго за спиной — показываем компактную подсказку у нижнего края
                 String backLabel = "▼ " + target.name + " сзади (" + (int) dist + " м)";
                 int tw = client.textRenderer.getWidth(backLabel);
                 int lx = (sw - tw) / 2;
@@ -219,12 +214,13 @@ public class RouteMapClient implements ClientModInitializer {
                         recordMode = 2;
                         recordedChestsCount = 0;
                         MapStorage.data.farmRoute.clear();
-MapStorage.data.farmRoute.add(new MapStorage.RoutePoint(targetPos.getX(), targetPos.getZ()));
-}
-boolean alreadyMarked = false;
-for (MapStorage.Waypoint wp : MapStorage.data.marks) {
-if ("CHEST".equals(wp.type)
-&& Math.abs(wp.x - targetPos.getX()) <= 2
+                        MapStorage.data.farmRoute.add(new MapStorage.RoutePoint(targetPos.getX(), targetPos.getZ()));
+                    }
+
+                    boolean alreadyMarked = false;
+                    for (MapStorage.Waypoint wp : MapStorage.data.marks) {
+                        if ("CHEST".equals(wp.type)
+                                && Math.abs(wp.x - targetPos.getX()) <= 2
 && Math.abs(wp.z - targetPos.getZ()) <= 2
 && Math.abs(wp.y - targetPos.getY()) <= 3) {
 alreadyMarked = true;
