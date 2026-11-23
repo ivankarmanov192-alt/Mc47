@@ -3,9 +3,14 @@ package ru.workshop.routemap;
 import net.fabricmc.api.ClientModInitializer;
 import net.fabricmc.fabric.api.client.event.lifecycle.v1.ClientTickEvents;
 import net.fabricmc.fabric.api.client.keybinding.v1.KeyBindingHelper;
-import net.fabricmc.fabric.api.client.rendering.v1.HudRenderCallback;
+import net.fabricmc.fabric.api.event.player.UseBlockCallback;
+import net.minecraft.block.BarrelBlock;
+import net.minecraft.block.Block;
 import net.minecraft.block.BlockState;
+import net.minecraft.block.ChestBlock;
+import net.minecraft.block.EnderChestBlock;
 import net.minecraft.block.MapColor;
+import net.minecraft.block.ShulkerBoxBlock;
 import net.minecraft.client.MinecraftClient;
 import net.minecraft.client.gui.Click;
 import net.minecraft.client.gui.DrawContext;
@@ -15,8 +20,8 @@ import net.minecraft.client.gui.widget.TextFieldWidget;
 import net.minecraft.client.option.KeyBinding;
 import net.minecraft.client.util.InputUtil;
 import net.minecraft.text.Text;
+import net.minecraft.util.ActionResult;
 import net.minecraft.util.math.BlockPos;
-import net.minecraft.util.math.MathHelper;
 import net.minecraft.world.Heightmap;
 import net.minecraft.world.World;
 import org.lwjgl.glfw.GLFW;
@@ -27,6 +32,11 @@ public class RouteMapClient implements ClientModInitializer {
     private static KeyBinding openMapKey;
     private static KeyBinding addMarkKey;
     private static MapStorage.Waypoint selectedMark = null;
+
+    // Режимы записи маршрута сундуков: 0 = выкл, 1 = ждём 1-й сундук, 2 = активно записываем
+    private static int recordMode = 0;
+    private static int recordedChestsCount = 0;
+
     private int tickCounter = 0;
     private int terrainSaveCounter = 0;
     private boolean terrainDirty = false;
@@ -41,6 +51,45 @@ public class RouteMapClient implements ClientModInitializer {
         addMarkKey = KeyBindingHelper.registerKeyBinding(new KeyBinding(
                 "key.routemap.mark", InputUtil.Type.KEYSYM, GLFW.GLFW_KEY_B, KeyBinding.Category.MISC
         ));
+
+        // Перехват открытия сундука/бочки/шалкера
+        UseBlockCallback.EVENT.register((player, world, hand, hitResult) -> {
+            if (!world.isClient() || recordMode == 0) return ActionResult.PASS;
+
+            BlockPos pos = hitResult.getBlockPos();
+            Block block = world.getBlockState(pos).getBlock();
+
+            if (block instanceof ChestBlock || block instanceof BarrelBlock || block instanceof ShulkerBoxBlock || block instanceof EnderChestBlock) {
+                if (recordMode == 1) {
+                    recordMode = 2;
+                    recordedChestsCount = 0;
+                    MapStorage.data.farmRoute.clear();
+                    MapStorage.data.farmRoute.add(new MapStorage.RoutePoint(pos.getX(), pos.getZ()));
+                }
+
+                // Проверяем, не отмечен ли уже этот конкретный сундук (в радиусе 2 блоков)
+                boolean alreadyMarked = false;
+                for (MapStorage.Waypoint wp : MapStorage.data.marks) {
+                    if ("CHEST".equals(wp.type) && Math.abs(wp.x - pos.getX()) <= 2 && Math.abs(wp.z - pos.getZ()) <= 2 && Math.abs(wp.y - pos.getY()) <= 2) {
+                        alreadyMarked = true;
+                        break;
+                    }
+                }
+
+                if (!alreadyMarked) {
+                    recordedChestsCount++;
+                    MapStorage.data.marks.add(new MapStorage.Waypoint(
+                            "Сундук #" + recordedChestsCount, "CHEST",
+                            pos.getX(), pos.getY(), pos.getZ()
+                    ));
+                    MapStorage.data.farmRoute.add(new MapStorage.RoutePoint(pos.getX(), pos.getZ()));
+                    MapStorage.save();
+
+                    player.sendMessage(Text.literal("§6[RouteMap] §aОтмечен Сундук #" + recordedChestsCount + " §7(" + pos.getX() + ", " + pos.getZ() + ")"), true);
+                }
+            }
+            return ActionResult.PASS;
+        });
 
         ClientTickEvents.END_CLIENT_TICK.register(client -> {
             if (client.player == null || client.world == null) return;
@@ -70,47 +119,6 @@ public class RouteMapClient implements ClientModInitializer {
                 MapStorage.saveTerrain();
             }
         });
-
-        // Компас прямо над хотбаром
-        HudRenderCallback.EVENT.register((ctx, tickCounter) -> {
-            MinecraftClient client = MinecraftClient.getInstance();
-            if (client.player == null || selectedMark == null || client.currentScreen != null) return;
-            if (!MapStorage.data.marks.contains(selectedMark)) {
-                selectedMark = null;
-                return;
-            }
-
-            double dx = selectedMark.x + 0.5 - client.player.getX();
-            double dz = selectedMark.z + 0.5 - client.player.getZ();
-            int dist = (int) Math.hypot(dx, dz);
-
-            double targetAngle = Math.toDegrees(Math.atan2(-dx, dz));
-            double diff = MathHelper.wrapDegrees(targetAngle - client.player.getYaw());
-
-            String arrow;
-            if (Math.abs(diff) < 18) arrow = "▲ ВПЕРЁД";
-            else if (diff >= 18 && diff < 65) arrow = "↗ ПРАВЕЕ";
-            else if (diff >= 65 && diff < 135) arrow = "► НАПРАВО";
-            else if (diff <= -18 && diff > -65) arrow = "↖ ЛЕВЕЕ";
-            else if (diff <= -65 && diff > -135) arrow = "◄ НАЛЕВО";
-            else arrow = "▼ СЗАДИ";
-
-            int color = switch (selectedMark.type) {
-                case "CHEST" -> 0xFFFACC15;
-                case "FARM" -> 0xFF4ADE80;
-                default -> 0xFF38BDF8;
-            };
-
-            String label = arrow + "  •  " + selectedMark.name + " (" + dist + " бл.)";
-            int sw = client.getWindow().getScaledWidth();
-            int sh = client.getWindow().getScaledHeight();
-            int textW = client.textRenderer.getWidth(label);
-            int bx = (sw - textW) / 2;
-            int by = sh - 54;
-
-            ctx.fill(bx - 6, by - 3, bx + textW + 6, by + 11, 0x990D1117);
-            ctx.drawTextWithShadow(client.textRenderer, label, bx, by, color);
-        });
     }
 
     private void scanTerrain(MinecraftClient client) {
@@ -119,7 +127,7 @@ public class RouteMapClient implements ClientModInitializer {
 
         int px = (int) Math.floor(client.player.getX());
         int pz = (int) Math.floor(client.player.getZ());
-        int radius = 48; // Сканируем квадрат 96x96 блоков вокруг игрока с шагом 2 блока
+        int radius = 48;
 
         BlockPos.Mutable pos = new BlockPos.Mutable();
         for (int dx = -radius; dx <= radius; dx += 2) {
@@ -152,24 +160,33 @@ public class RouteMapClient implements ClientModInitializer {
         int px = (int) Math.floor(client.player.getX());
         int pz = (int) Math.floor(client.player.getZ());
 
-        List<MapStorage.RoutePoint> trail = MapStorage.data.trail;
-        if (trail.isEmpty()) {
-            trail.add(new MapStorage.RoutePoint(px, pz));
+        // Обычный след прогулки
+        appendPoint(MapStorage.data.trail, px, pz, 15000);
+
+        // Золотой маршрут фарма (если открыли первый сундук и запись идёт)
+        if (recordMode == 2) {
+            appendPoint(MapStorage.data.farmRoute, px, pz, 10000);
+        }
+    }
+
+    private void appendPoint(List<MapStorage.RoutePoint> list, int px, int pz, int maxLen) {
+        if (list.isEmpty()) {
+            list.add(new MapStorage.RoutePoint(px, pz));
             MapStorage.save();
             return;
         }
 
-        MapStorage.RoutePoint last = trail.get(trail.size() - 1);
+        MapStorage.RoutePoint last = list.get(list.size() - 1);
         double dist = Math.hypot(px - last.x, pz - last.z);
 
         if (dist > 120) {
-            trail.add(new MapStorage.RoutePoint(Integer.MIN_VALUE, Integer.MIN_VALUE));
-            trail.add(new MapStorage.RoutePoint(px, pz));
+            list.add(new MapStorage.RoutePoint(Integer.MIN_VALUE, Integer.MIN_VALUE));
+            list.add(new MapStorage.RoutePoint(px, pz));
             MapStorage.save();
         } else if (dist >= 3) {
-            trail.add(new MapStorage.RoutePoint(px, pz));
-            if (trail.size() > 15000) {
-                trail.remove(0);
+            list.add(new MapStorage.RoutePoint(px, pz));
+            if (list.size() > maxLen) {
+                list.remove(0);
             }
             MapStorage.save();
         }
@@ -183,6 +200,14 @@ public class RouteMapClient implements ClientModInitializer {
             super(Text.literal("Карта маршрута"));
         }
 
+        private String getRecordButtonText() {
+            return switch (recordMode) {
+                case 1 -> "§eЖду 1-й сундук...";
+                case 2 -> "§aИдёт запись (" + recordedChestsCount + ")";
+                default -> "Запись лута: ВЫКЛ";
+            };
+        }
+
         @Override
         protected void init() {
             if (client != null && client.player != null) {
@@ -191,15 +216,15 @@ public class RouteMapClient implements ClientModInitializer {
             }
 
             addDrawableChild(ButtonWidget.builder(Text.literal("+"), b -> zoom = Math.min(8.0, zoom * 1.4))
-                    .dimensions(10, 10, 24, 20).build());
+                    .dimensions(10, 10, 22, 20).build());
             addDrawableChild(ButtonWidget.builder(Text.literal("-"), b -> zoom = Math.max(0.25, zoom / 1.4))
-                    .dimensions(38, 10, 24, 20).build());
+                    .dimensions(34, 10, 22, 20).build());
             addDrawableChild(ButtonWidget.builder(Text.literal("Я"), b -> {
                 if (client != null && client.player != null) {
                     centerX = client.player.getX();
                     centerZ = client.player.getZ();
                 }
-            }).dimensions(66, 10, 24, 20).build());
+            }).dimensions(58, 10, 22, 20).build());
 
             addDrawableChild(ButtonWidget.builder(Text.literal("+ Метка (B)"), b -> {
                 if (client != null && client.player != null) {
@@ -209,39 +234,50 @@ public class RouteMapClient implements ClientModInitializer {
                             (int) Math.floor(client.player.getZ())
                     ));
                 }
-            }).dimensions(94, 10, 80, 20).build());
+            }).dimensions(84, 10, 74, 20).build());
 
-            addDrawableChild(ButtonWidget.builder(Text.literal("Очистить след"), b -> {
-                MapStorage.data.trail.clear();
-                MapStorage.save();
-            }).dimensions(width - 105, 10, 95, 20).build());
-        }
-
-        @Override
-        public boolean mouseClicked(Click click, boolean doubled) {
-            if (super.mouseClicked(click, doubled)) return true;
-            if (client == null || client.player == null) return false;
-
-            double mx = click.x();
-            double my = click.y();
-            if (my <= 35 || my >= height - 18) return false;
-
-            int midX = width / 2;
-            int midY = height / 2;
-            List<MapStorage.Waypoint> marks = MapStorage.data.marks;
-
-            for (int i = marks.size() - 1; i >= 0; i--) {
-                MapStorage.Waypoint wp = marks.get(i);
-                int sx = (int) (midX + (wp.x - centerX) * zoom);
-                int sy = (int) (midY + (wp.z - centerZ) * zoom);
-
-                if (Math.hypot(mx - sx, my - sy) <= 8) {
-                    if (click.button() == 0) {
-                        selectedMark = (selectedMark == wp) ? null : wp;
-                        return true;
-                    } else if (click.button() == 1) {
-                        if (selectedMark == wp) selectedMark = null;
-                        marks.remove(i);
+            // Кнопка записи маршрута сундуков
+            addDrawableChild(ButtonWidget.builder(Text.literal(getRecordButtonText()), b -> {
+                if (recordMode == 0) {
+                    recordMode = 1; // Ждём открытия 1-го сундука
+                } else {
+                    recordMode = 0; // Останавливаем запись
+                    MapStorage.save();
+                }
+b.setMessage(Text.literal(getRecordButtonText()));
+}).dimensions(162, 10, 125, 20).build());
+addDrawableChild(ButtonWidget.builder(Text.literal("Сброс лута"), b -> {
+recordMode = 0;
+recordedChestsCount = 0;
+MapStorage.data.farmRoute.clear();
+MapStorage.save();
+}).dimensions(width - 178, 10, 76, 20).build());
+addDrawableChild(ButtonWidget.builder(Text.literal("Очистить след"), b -> {
+MapStorage.data.trail.clear();
+MapStorage.save();
+}).dimensions(width - 98, 10, 88, 20).build());
+}
+@Override
+public boolean mouseClicked(Click click, boolean doubled) {
+if (super.mouseClicked(click, doubled)) return true;
+if (client == null || client.player == null) return false;
+double mx = click.x();
+double my = click.y();
+if (my <= 35 || my >= height - 18) return false;
+int midX = width / 2;
+int midY = height / 2;
+List<MapStorage.Waypoint> marks = MapStorage.data.marks;
+for (int i = marks.size() - 1; i >= 0; i--) {
+MapStorage.Waypoint wp = marks.get(i);
+int sx = (int) (midX + (wp.x - centerX) * zoom);
+int sy = (int) (midY + (wp.z - centerZ) * zoom);
+if (Math.hypot(mx - sx, my - sy) <= 8) {
+if (click.button() == 0) {
+selectedMark = (selectedMark == wp) ? null : wp;
+return true;
+} else if (click.button() == 1) {
+if (selectedMark == wp) selectedMark = null;
+marks.remove(i);
 MapStorage.save();
 return true;
 }
@@ -274,7 +310,7 @@ super.render(ctx, mouseX, mouseY, delta);
 if (client == null || client.player == null) return;
 int midX = width / 2;
 int midY = height / 2;
-// Отрисовка рельефа местности (клетки 2x2 блока с тенями высот)
+// Рельеф местности
 int minGX = (int) Math.floor((centerX - midX / zoom) / 2.0) - 1;
 int maxGX = (int) Math.ceil((centerX + midX / zoom) / 2.0) + 1;
 int minGZ = (int) Math.floor((centerZ - (midY - 36) / zoom) / 2.0) - 1;
@@ -293,7 +329,6 @@ int y = (val >> 24) & 0xFF;
 int r = (val >> 16) & 0xFF;
 int g = (val >> 8) & 0xFF;
 int b = val & 0xFF;
-// Тень рельефа от северного/западного соседа
 Integer northVal = MapStorage.terrain.get(MapStorage.packGrid(gx, gz - 1));
 float shade = 1.0f;
 if (northVal != null) {
@@ -308,29 +343,21 @@ int argb = 0xFF000000 | (r << 16) | (g << 8) | b;
 ctx.fill(sx1, Math.max(35, sy1), Math.max(sx1 + 1, sx2), Math.min(height - 18, Math.max(sy1 + 1, sy2)), argb);
 }
 }
-// След маршрута (полупрозрачный белый/голубой поверх ландшафта)
-List<MapStorage.RoutePoint> trail = MapStorage.data.trail;
-for (int i = 1; i < trail.size(); i++) {
-MapStorage.RoutePoint p1 = trail.get(i - 1);
-MapStorage.RoutePoint p2 = trail.get(i);
-if (p1.x == Integer.MIN_VALUE || p2.x == Integer.MIN_VALUE) continue;
-int x1 = (int) (midX + (p1.x - centerX) * zoom);
-int y1 = (int) (midY + (p1.z - centerZ) * zoom);
-int x2 = (int) (midX + (p2.x - centerX) * zoom);
-int y2 = (int) (midY + (p2.z - centerZ) * zoom);
-drawLine(ctx, x1, y1, x2, y2, 0xAAFFFFFF);
-}
+// 1. Обычный белый след прогулки
+renderPolyline(ctx, MapStorage.data.trail, midX, midY, 0x66FFFFFF, 1);
+// 2. Яркий золотой маршрут фарма сундуков
+renderPolyline(ctx, MapStorage.data.farmRoute, midX, midY, 0xFFFFD700, 3);
 int px = (int) (midX + (client.player.getX() - centerX) * zoom);
 int py = (int) (midY + (client.player.getZ() - centerZ) * zoom);
 // Линия до выбранной цели
 if (selectedMark != null && MapStorage.data.marks.contains(selectedMark)) {
 int tx = (int) (midX + (selectedMark.x - centerX) * zoom);
 int ty = (int) (midY + (selectedMark.z - centerZ) * zoom);
-drawLine(ctx, px, py, tx, ty, 0xFFFF5500);
+drawLine(ctx, px, py, tx, ty, 0xFFFF5500, 2);
 } else {
 selectedMark = null;
 }
-// Метки с тёмной подложкой для читаемости на песке
+// Метки
 for (MapStorage.Waypoint wp : MapStorage.data.marks) {
 int sx = (int) (midX + (wp.x - centerX) * zoom);
 int sy = (int) (midY + (wp.z - centerZ) * zoom);
@@ -357,17 +384,29 @@ if (selectedMark != null) {
 int dist = (int) Math.hypot(selectedMark.x - client.player.getX(), selectedMark.z - client.player.getZ());
 targetText = " | Цель: " + selectedMark.name + " (" + dist + " бл.)";
 }
-String info = String.format("Корды: %d, %d%s | ЛКМ по метке = компас над хотбаром, ПКМ = поставить/удалить",
+String info = String.format("Корды: %d, %d%s | ЛКМ = маршрут, ПКМ = поставить/удалить",
 (int) client.player.getX(), (int) client.player.getZ(), targetText);
 ctx.drawTextWithShadow(textRenderer, info, 10, height - 14, 0xFFCBD5E1);
 }
-private void drawLine(DrawContext ctx, int x0, int y0, int x1, int y1, int color) {
+private void renderPolyline(DrawContext ctx, List<MapStorage.RoutePoint> list, int midX, int midY, int color, int thickness) {
+for (int i = 1; i < list.size(); i++) {
+MapStorage.RoutePoint p1 = list.get(i - 1);
+MapStorage.RoutePoint p2 = list.get(i);
+if (p1.x == Integer.MIN_VALUE || p2.x == Integer.MIN_VALUE) continue;
+int x1 = (int) (midX + (p1.x - centerX) * zoom);
+int y1 = (int) (midY + (p1.z - centerZ) * zoom);
+int x2 = (int) (midX + (p2.x - centerX) * zoom);
+int y2 = (int) (midY + (p2.z - centerZ) * zoom);
+drawLine(ctx, x1, y1, x2, y2, color, thickness);
+}
+}
+private void drawLine(DrawContext ctx, int x0, int y0, int x1, int y1, int color, int thickness) {
 int dx = Math.abs(x1 - x0), sx = x0 < x1 ? 1 : -1;
 int dy = -Math.abs(y1 - y0), sy = y0 < y1 ? 1 : -1;
 int err = dx + dy, e2;
 while (true) {
 if (x0 >= 0 && x0 < width && y0 >= 35 && y0 < height - 18) {
-ctx.fill(x0, y0, x0 + 2, y0 + 2, color);
+ctx.fill(x0, y0, x0 + thickness, y0 + thickness, color);
 }
 if (x0 == x1 && y0 == y1) break;
 e2 = 2 * err;
