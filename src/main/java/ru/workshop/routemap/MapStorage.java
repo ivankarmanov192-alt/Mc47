@@ -18,10 +18,11 @@ public class MapStorage {
     private static final Path TERRAIN_FILE = FabricLoader.getInstance().getConfigDir().resolve("routemap_terrain.json");
 
     public static MapData data = new MapData();
-    public static Map<Long, Integer> terrain = new HashMap<>(); // key: packed (gx, gz), val: (y << 24) | rgb
+    public static Map<Long, Integer> terrain = new HashMap<>();
 
     public static class MapData {
         public List<RoutePoint> trail = new ArrayList<>();
+        public List<RoutePoint> farmRoute = new ArrayList<>(); // Золотой маршрут фарма сундуков
         public List<Waypoint> marks = new ArrayList<>();
     }
 
@@ -58,6 +59,7 @@ public class MapStorage {
                 data = GSON.fromJson(Files.readString(FILE), MapData.class);
                 if (data == null) data = new MapData();
                 if (data.trail == null) data.trail = new ArrayList<>();
+                if (data.farmRoute == null) data.farmRoute = new ArrayList<>();
                 if (data.marks == null) data.marks = new ArrayList<>();
             }
             if (Files.exists(TERRAIN_FILE)) {
